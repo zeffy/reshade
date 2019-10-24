@@ -20,7 +20,6 @@
 #include <stb_image_write.h>
 #include <stb_image_resize.h>
 
-extern volatile long g_network_traffic;
 extern std::filesystem::path g_reshade_dll_path;
 extern std::filesystem::path g_target_executable_path;
 
@@ -233,21 +232,7 @@ void reshade::runtime::on_present()
 	// Save modified INI files
 	ini_file::flush_cache();
 
-	// Detect high network traffic
-	static int cooldown = 0, traffic = 0;
-	if (cooldown-- > 0)
-	{
-		traffic += g_network_traffic > 0;
-	}
-	else
-	{
-		_has_high_network_activity = traffic > 10;
-		traffic = 0;
-		cooldown = 30;
-	}
-
 	// Reset frame statistics
-	g_network_traffic = 0;
 	_drawcalls = _vertices = 0;
 }
 

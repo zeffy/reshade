@@ -1964,9 +1964,7 @@ void reshade::vulkan::runtime_vk::draw_debug_menu()
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
 void reshade::vulkan::runtime_vk::update_depthstencil_image(VkImage image, VkImageLayout layout, VkFormat image_format)
 {
-	if (_has_high_network_activity)
-		image = VK_NULL_HANDLE;
-	else if (_depth_image_override != VK_NULL_HANDLE && image != _depth_image_override)
+	if (_depth_image_override != VK_NULL_HANDLE && image != _depth_image_override)
 		return;
 
 	if (image == _depth_image)

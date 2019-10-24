@@ -1416,15 +1416,6 @@ void reshade::d3d9::runtime_d3d9::detect_depth_source()
 	if (!_init_depthbuffer_detection && (_framecount % 30 || _is_multisampling_enabled || _depth_source_table.empty()))
 		return;
 
-	if (_has_high_network_activity)
-	{
-		// Force depth source table recreation
-		_depth_buffer_table.clear();
-		_depth_source_table.clear();
-		create_depthstencil_replacement(nullptr);
-		return;
-	}
-
 	depth_source_info best_info = {};
 	com_ptr<IDirect3DSurface9> best_match;
 

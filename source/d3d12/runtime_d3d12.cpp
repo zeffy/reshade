@@ -1601,9 +1601,7 @@ void reshade::d3d12::runtime_d3d12::draw_debug_menu()
 #if RESHADE_DX12_CAPTURE_DEPTH_BUFFERS
 void reshade::d3d12::runtime_d3d12::update_depthstencil_texture(com_ptr<ID3D12Resource> texture)
 {
-	if (_has_high_network_activity)
-		texture = nullptr;
-	else if (_depth_texture_override != nullptr && texture != _depth_texture_override)
+	if (_depth_texture_override != nullptr && texture != _depth_texture_override)
 		return;
 
 	if (texture == _depth_texture)
