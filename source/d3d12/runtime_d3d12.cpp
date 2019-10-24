@@ -1624,12 +1624,6 @@ void reshade::d3d12::runtime_d3d12::detect_depth_source(draw_call_tracker &track
 	if (_is_multisampling_enabled || _best_depth_stencil_overwrite != nullptr || (_framecount % 30 && !depth_buffer_before_clear))
 		return;
 
-	if (_has_high_network_activity)
-	{
-		update_depthstencil_texture(nullptr);
-		return;
-	}
-
 	if (depth_buffer_before_clear)
 	{
 		// At the final rendering stage, it is fine to rely on the depth stencil to select the best depth texture

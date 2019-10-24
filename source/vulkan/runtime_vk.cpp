@@ -1917,12 +1917,6 @@ void reshade::vulkan::runtime_vk::detect_depth_source(draw_call_tracker &tracker
 	if (_is_multisampling_enabled || _best_depth_stencil_overwrite != VK_NULL_HANDLE || (_framecount % 30 && !depth_buffer_before_clear))
 		return;
 
-	if (_has_high_network_activity)
-	{
-		update_depthstencil_image(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED);
-		return;
-	}
-
 	if (depth_buffer_before_clear)
 	{
 		// At the final rendering stage, it is fine to rely on the depth stencil to select the best depth texture
