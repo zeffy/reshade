@@ -102,7 +102,7 @@ reshade::runtime::runtime() :
 	_reload_key_data(),
 	_effects_key_data(),
 	_screenshot_key_data(),
-	_previous_preset_key_data(),
+	_prev_preset_key_data(),
 	_next_preset_key_data(),
 	_screenshot_path(g_target_executable_path.parent_path())
 {
@@ -204,7 +204,7 @@ void reshade::runtime::on_present()
 				load_effects();
 
 			const bool is_next_preset_key_pressed = _input->is_key_pressed(_next_preset_key_data);
-			const bool is_previous_preset_key_pressed = _input->is_key_pressed(_previous_preset_key_data);
+			const bool is_previous_preset_key_pressed = _input->is_key_pressed(_prev_preset_key_data);
 
 			if (is_next_preset_key_pressed || is_previous_preset_key_pressed)
 			{
@@ -306,11 +306,11 @@ void reshade::runtime::load_effect(const std::filesystem::path &path, size_t &ou
 
 		std::unique_ptr<reshadefx::codegen> codegen;
 		if ((_renderer_id & 0xF0000) == 0)
-			codegen.reset(reshadefx::create_codegen_hlsl(shader_model, true, _performance_mode));
+			codegen.reset(reshadefx::create_codegen_hlsl(shader_model, !_no_debug_info, _performance_mode));
 		else if (_renderer_id < 0x20000)
-			codegen.reset(reshadefx::create_codegen_glsl(true, _performance_mode));
+			codegen.reset(reshadefx::create_codegen_glsl(!_no_debug_info, _performance_mode));
 		else // Vulkan uses SPIR-V input
-			codegen.reset(reshadefx::create_codegen_spirv(true, true, _performance_mode));
+			codegen.reset(reshadefx::create_codegen_spirv(true, !_no_debug_info, _performance_mode));
 
 		reshadefx::parser parser;
 
@@ -942,7 +942,7 @@ void reshade::runtime::load_config()
 	config.get("INPUT", "KeyReload", _reload_key_data);
 	config.get("INPUT", "KeyEffects", _effects_key_data);
 	config.get("INPUT", "KeyScreenshot", _screenshot_key_data);
-	config.get("INPUT", "KeyPreviousPreset", _previous_preset_key_data);
+	config.get("INPUT", "KeyPreviousPreset", _prev_preset_key_data);
 	config.get("INPUT", "KeyNextPreset", _next_preset_key_data);
 	config.get("INPUT", "PresetTransitionDelay", _preset_transition_delay);
 
@@ -953,8 +953,10 @@ void reshade::runtime::load_config()
 	config.get("GENERAL", "CurrentPresetPath", current_preset_path);
 	config.get("GENERAL", "ScreenshotPath", _screenshot_path);
 	config.get("GENERAL", "ScreenshotFormat", _screenshot_format);
-	config.get("GENERAL", "ScreenshotIncludePreset", _screenshot_include_preset);
 	config.get("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);
+	config.get("GENERAL", "ScreenshotIncludePreset", _screenshot_include_preset);
+
+	config.get("GENERAL", "NoDebugInfo", _no_debug_info);
 	config.get("GENERAL", "NoReloadOnInit", _no_reload_on_init);
 
 	if (current_preset_path.empty())
@@ -984,7 +986,7 @@ void reshade::runtime::save_config() const
 	config.set("INPUT", "KeyReload", _reload_key_data);
 	config.set("INPUT", "KeyEffects", _effects_key_data);
 	config.set("INPUT", "KeyScreenshot", _screenshot_key_data);
-	config.set("INPUT", "KeyPreviousPreset", _previous_preset_key_data);
+	config.set("INPUT", "KeyPreviousPreset", _prev_preset_key_data);
 	config.set("INPUT", "KeyNextPreset", _next_preset_key_data);
 	config.set("INPUT", "PresetTransitionDelay", _preset_transition_delay);
 
@@ -995,8 +997,10 @@ void reshade::runtime::save_config() const
 	config.set("GENERAL", "CurrentPresetPath", _current_preset_path);
 	config.set("GENERAL", "ScreenshotPath", _screenshot_path);
 	config.set("GENERAL", "ScreenshotFormat", _screenshot_format);
-	config.set("GENERAL", "ScreenshotIncludePreset", _screenshot_include_preset);
 	config.set("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);
+	config.set("GENERAL", "ScreenshotIncludePreset", _screenshot_include_preset);
+
+	config.set("GENERAL", "NoDebugInfo", _no_debug_info);
 	config.set("GENERAL", "NoReloadOnInit", _no_reload_on_init);
 
 	for (const auto &callback : _save_config_callables)
