@@ -727,7 +727,7 @@ void reshade::runtime::update_and_render_effects()
 	const auto input_lock = _input->lock();
 
 	if (_should_save_screenshot && (_screenshot_save_before || !_effects_enabled))
-		save_screenshot(_effects_enabled ? L"-original" : std::wstring(), !_effects_enabled);
+		save_screenshot(_effects_enabled ? L" original" : std::wstring(), !_effects_enabled);
 
 	// Nothing to do here if effects are disabled globally
 	if (!_effects_enabled)
@@ -756,7 +756,7 @@ void reshade::runtime::update_and_render_effects()
 				int data[4];
 				get_uniform_value(variable, data, 4);
 				const std::string_view ui_items = variable.annotation_as_string("ui_items");
-				size_t num_items = 0;
+				int num_items = 0;
 				for (size_t offset = 0, next; (next = ui_items.find('\0', offset)) != std::string::npos; offset = next + 1)
 					num_items++;
 				data[0] = (data[0] + 1 >= num_items) ? 0 : data[0] + 1;
@@ -944,13 +944,13 @@ void reshade::runtime::load_config()
 	config.get("INPUT", "KeyScreenshot", _screenshot_key_data);
 	config.get("INPUT", "KeyPreviousPreset", _prev_preset_key_data);
 	config.get("INPUT", "KeyNextPreset", _next_preset_key_data);
-	config.get("INPUT", "PresetTransitionDelay", _preset_transition_delay);
 
 	config.get("GENERAL", "PerformanceMode", _performance_mode);
 	config.get("GENERAL", "EffectSearchPaths", _effect_search_paths);
 	config.get("GENERAL", "TextureSearchPaths", _texture_search_paths);
 	config.get("GENERAL", "PreprocessorDefinitions", _global_preprocessor_definitions);
 	config.get("GENERAL", "CurrentPresetPath", current_preset_path);
+	config.get("GENERAL", "PresetTransitionDelay", _preset_transition_delay);
 	config.get("GENERAL", "ScreenshotPath", _screenshot_path);
 	config.get("GENERAL", "ScreenshotFormat", _screenshot_format);
 	config.get("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);
@@ -988,13 +988,13 @@ void reshade::runtime::save_config() const
 	config.set("INPUT", "KeyScreenshot", _screenshot_key_data);
 	config.set("INPUT", "KeyPreviousPreset", _prev_preset_key_data);
 	config.set("INPUT", "KeyNextPreset", _next_preset_key_data);
-	config.set("INPUT", "PresetTransitionDelay", _preset_transition_delay);
 
 	config.set("GENERAL", "PerformanceMode", _performance_mode);
 	config.set("GENERAL", "EffectSearchPaths", _effect_search_paths);
 	config.set("GENERAL", "TextureSearchPaths", _texture_search_paths);
 	config.set("GENERAL", "PreprocessorDefinitions", _global_preprocessor_definitions);
 	config.set("GENERAL", "CurrentPresetPath", _current_preset_path);
+	config.set("GENERAL", "PresetTransitionDelay", _preset_transition_delay);
 	config.set("GENERAL", "ScreenshotPath", _screenshot_path);
 	config.set("GENERAL", "ScreenshotFormat", _screenshot_format);
 	config.set("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);

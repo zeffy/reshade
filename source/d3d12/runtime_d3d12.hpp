@@ -6,12 +6,8 @@
 #pragma once
 
 #include "runtime.hpp"
-#include "com_ptr.hpp"
 #include "draw_call_tracker.hpp"
-#include <d3d12.h>
 #include <dxgi1_5.h>
-
-#define RESHADE_DX12_CAPTURE_DEPTH_BUFFERS 1
 
 namespace reshadefx { struct sampler_info; }
 
@@ -30,19 +26,12 @@ namespace reshade::d3d12
 			);
 		void on_reset();
 		void on_present(draw_call_tracker& tracker);
-		void on_create_depthstencil_view(ID3D12Resource *pResource);
 
 		bool capture_screenshot(uint8_t *buffer) const override;
 
 #if RESHADE_DX12_CAPTURE_DEPTH_BUFFERS
-		com_ptr<ID3D12Resource> select_depth_texture_save(D3D12_RESOURCE_DESC &texture_desc, const D3D12_HEAP_PROPERTIES *props);
+		com_ptr<ID3D12Resource> create_compatible_texture(D3D12_RESOURCE_DESC desc);
 #endif
-
-		bool depth_buffer_before_clear = false;
-		bool depth_buffer_more_copies = false;
-		bool extended_depth_buffer_detection = false;
-		unsigned int cleared_depth_buffer_index = 0;
-		int depth_buffer_texture_format = 0; // No depth buffer texture format filter by default
 
 	private:
 		bool init_backbuffer_textures(UINT num_buffers);
@@ -51,6 +40,13 @@ namespace reshade::d3d12
 
 		bool init_texture(texture &info) override;
 		void upload_texture(texture &texture, const uint8_t *pixels) override;
+
+		void generate_mipmaps(const com_ptr<ID3D12GraphicsCommandList> &list, texture &texture);
+
+		com_ptr<ID3D12RootSignature> create_root_signature(const D3D12_ROOT_SIGNATURE_DESC &desc) const;
+		com_ptr<ID3D12GraphicsCommandList> create_command_list(const com_ptr<ID3D12PipelineState> &state = nullptr) const;
+		void execute_command_list(const com_ptr<ID3D12GraphicsCommandList> &list) const;
+		void wait_for_command_queue() const;
 
 		bool compile_effect(effect_data &effect) override;
 		void unload_effect(size_t id) override;
@@ -67,28 +63,15 @@ namespace reshade::d3d12
 #endif
 
 #if RESHADE_DX12_CAPTURE_DEPTH_BUFFERS
-		void detect_depth_source(draw_call_tracker& tracker);
-		bool update_depthstencil_texture(ID3D12Resource *texture);
+		void update_depthstencil_texture(com_ptr<ID3D12Resource> texture);
 
-		struct depth_texture_save_info
-		{
-			com_ptr<ID3D12Resource> src_texture;
-			D3D12_RESOURCE_DESC src_texture_desc;
-			com_ptr<ID3D12Resource> dest_texture;
-			bool cleared = false;
-		};
+		ID3D12Resource *_depth_texture_override = nullptr;
+		std::unordered_map<UINT64, com_ptr<ID3D12Resource>> _saved_depth_textures;
 #endif
 
-		void generate_mipmaps(const com_ptr<ID3D12GraphicsCommandList> &list, texture &texture);
-
-		com_ptr<ID3D12RootSignature> create_root_signature(const D3D12_ROOT_SIGNATURE_DESC &desc) const;
-		com_ptr<ID3D12GraphicsCommandList> create_command_list(const com_ptr<ID3D12PipelineState> &state = nullptr) const;
-		void execute_command_list(const com_ptr<ID3D12GraphicsCommandList> &list) const;
-		void wait_for_command_queue() const;
-
-		com_ptr<ID3D12Device> _device;
-		com_ptr<ID3D12CommandQueue> _commandqueue;
-		com_ptr<IDXGISwapChain3> _swapchain;
+		const com_ptr<ID3D12Device> _device;
+		const com_ptr<ID3D12CommandQueue> _commandqueue;
+		const com_ptr<IDXGISwapChain3> _swapchain;
 
 		UINT _swap_index = 0;
 		HANDLE _fence_event = nullptr;
@@ -104,11 +87,7 @@ namespace reshade::d3d12
 		com_ptr<ID3D12DescriptorHeap> _depthstencil_dsvs;
 		std::vector<com_ptr<ID3D12Resource>> _backbuffers;
 		com_ptr<ID3D12Resource> _default_depthstencil;
-		com_ptr<ID3D12Resource> _depthstencil_texture;
-		ID3D12Resource *_best_depth_stencil_overwrite = nullptr;
-
-		std::map<UINT, depth_texture_save_info> _displayed_depth_textures;
-		std::unordered_map<UINT64, com_ptr<ID3D12Resource>> _depth_texture_saves;
+		com_ptr<ID3D12Resource> _depth_texture;
 
 		com_ptr<ID3D12Resource> _backbuffer_texture;
 
@@ -127,10 +106,11 @@ namespace reshade::d3d12
 		draw_call_tracker *_current_tracker = nullptr;
 
 #if RESHADE_GUI
-		unsigned int _imgui_index_buffer_size[3] = {};
-		com_ptr<ID3D12Resource> _imgui_index_buffer[3];
-		unsigned int _imgui_vertex_buffer_size[3] = {};
-		com_ptr<ID3D12Resource> _imgui_vertex_buffer[3];
+		static const unsigned int IMGUI_BUFFER_COUNT = 5;
+		unsigned int _imgui_index_buffer_size[IMGUI_BUFFER_COUNT] = {};
+		com_ptr<ID3D12Resource> _imgui_index_buffer[IMGUI_BUFFER_COUNT];
+		unsigned int _imgui_vertex_buffer_size[IMGUI_BUFFER_COUNT] = {};
+		com_ptr<ID3D12Resource> _imgui_vertex_buffer[IMGUI_BUFFER_COUNT];
 		com_ptr<ID3D12PipelineState> _imgui_pipeline;
 		com_ptr<ID3D12RootSignature> _imgui_signature;
 #endif

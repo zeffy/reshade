@@ -10,6 +10,7 @@
 #include "resources.hpp"
 #include "format_utils.hpp"
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #define check_result(call) \
 	if ((call) != VK_SUCCESS) \
@@ -89,26 +90,44 @@ reshade::vulkan::runtime_vk::runtime_vk(VkDevice device, VkPhysicalDevice physic
 
 	instance_table.GetPhysicalDeviceMemoryProperties(physical_device, &_memory_props);
 
+	uint32_t num_queue_families = 0;
+	instance_table.GetPhysicalDeviceQueueFamilyProperties(_physical_device, &num_queue_families, nullptr);
+	std::vector<VkQueueFamilyProperties> queue_families(num_queue_families);
+	instance_table.GetPhysicalDeviceQueueFamilyProperties(_physical_device, &num_queue_families, queue_families.data());
+
+	// Find a queue with graphics support
+	for (uint32_t i = 0; i < num_queue_families; ++i)
+	{
+		if (queue_families[i].queueCount > 0 && (queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+		{
+			_queue_family_index = i;
+			break;
+		}
+	}
+
+	// TODO: Need to ensure the device was actually created with support for this queue
+	vk.GetDeviceQueue(device, _queue_family_index, 0, &_main_queue);
+
 #if RESHADE_GUI
 	subscribe_to_ui("Vulkan", [this]() { draw_debug_menu(); });
 #endif
 	subscribe_to_load_config([this](const ini_file &config) {
-		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferRetrievalMode", depth_buffer_before_clear);
-		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferTextureFormat", depth_buffer_texture_format);
-		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferMoreCopies", depth_buffer_more_copies);
-		config.get("VULKAN_BUFFER_DETECTION", "ExtendedDepthBufferDetection", extended_depth_buffer_detection);
-		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferClearingNumber", cleared_depth_buffer_index);
+		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferRetrievalMode", draw_call_tracker::preserve_depth_buffers);
+		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferTextureFormat", draw_call_tracker::filter_depth_texture_format);
+		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferMoreCopies", draw_call_tracker::preserve_stencil_buffers);
+		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferClearingNumber", draw_call_tracker::depth_stencil_clear_index);
+		config.get("VULKAN_BUFFER_DETECTION", "UseAspectRatioHeuristics", draw_call_tracker::filter_aspect_ratio);
 	});
 	subscribe_to_save_config([this](ini_file &config) {
-		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferRetrievalMode", depth_buffer_before_clear);
-		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferTextureFormat", depth_buffer_texture_format);
-		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferMoreCopies", depth_buffer_more_copies);
-		config.set("VULKAN_BUFFER_DETECTION", "ExtendedDepthBufferDetection", extended_depth_buffer_detection);
-		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferClearingNumber", cleared_depth_buffer_index);
+		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferRetrievalMode", draw_call_tracker::preserve_depth_buffers);
+		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferTextureFormat", draw_call_tracker::filter_depth_texture_format);
+		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferMoreCopies", draw_call_tracker::preserve_stencil_buffers);
+		config.set("VULKAN_BUFFER_DETECTION", "DepthBufferClearingNumber", draw_call_tracker::depth_stencil_clear_index);
+		config.set("VULKAN_BUFFER_DETECTION", "UseAspectRatioHeuristics", draw_call_tracker::filter_aspect_ratio);
 	});
 }
 
-VkImage reshade::vulkan::runtime_vk::create_image(uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage_flags, VkMemoryPropertyFlags mem_flags, VkImageCreateFlags flags)
+auto reshade::vulkan::runtime_vk::create_image(uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage_flags, VkMemoryPropertyFlags mem_flags, VkImageCreateFlags flags) -> VkImage
 {
 	VkImageCreateInfo create_info { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	create_info.flags = flags;
@@ -152,7 +171,21 @@ VkImage reshade::vulkan::runtime_vk::create_image(uint32_t width, uint32_t heigh
 
 	return res.release();
 }
-VkBuffer reshade::vulkan::runtime_vk::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage_flags, VkMemoryPropertyFlags mem_flags)
+auto reshade::vulkan::runtime_vk::create_image_view(VkImage image, VkFormat format, uint32_t levels, VkImageAspectFlags aspect) -> VkImageView
+{
+	VkImageViewCreateInfo create_info { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	create_info.image = image;
+	create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	create_info.format = format;
+	create_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+	create_info.subresourceRange = { aspect, 0, levels, 0, 1 };
+
+	vk_handle<VK_OBJECT_TYPE_IMAGE_VIEW> res(_device, vk);
+	check_result(vk.CreateImageView(_device, &create_info, nullptr, &res)) VK_NULL_HANDLE;
+
+	return res.release();
+}
+auto reshade::vulkan::runtime_vk::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage_flags, VkMemoryPropertyFlags mem_flags) -> VkBuffer
 {
 	VkBufferCreateInfo create_info { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	create_info.size = size;
@@ -188,34 +221,53 @@ VkBuffer reshade::vulkan::runtime_vk::create_buffer(VkDeviceSize size, VkBufferU
 
 	return res.release();
 }
-VkImageView reshade::vulkan::runtime_vk::create_image_view(VkImage image, VkFormat format, uint32_t levels, VkImageAspectFlags aspect)
+
+void reshade::vulkan::runtime_vk::transition_layout(VkCommandBuffer cmd_list, VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkImageSubresourceRange subresource) const
 {
-	VkImageViewCreateInfo create_info { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-	create_info.image = image;
-	create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	create_info.format = format;
-	create_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
-	create_info.subresourceRange = { aspect, 0, levels, 0, 1 };
+	const auto layout_to_access = [](VkImageLayout layout) -> VkAccessFlags {
+		switch (layout)
+		{
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+			return VK_ACCESS_TRANSFER_READ_BIT;
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			return VK_ACCESS_TRANSFER_WRITE_BIT;
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			return VK_ACCESS_SHADER_READ_BIT;
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+			return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+		case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
+		case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
+			return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		}
+		return 0;
+	};
+	const auto layout_to_stage = [](VkImageLayout layout) -> VkPipelineStageFlags {
+		switch (layout)
+		{
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			return VK_PIPELINE_STAGE_TRANSFER_BIT;
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+		case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
+		case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
+			return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		}
+		return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	};
 
-	vk_handle<VK_OBJECT_TYPE_IMAGE_VIEW> res(_device, vk);
-	check_result(vk.CreateImageView(_device, &create_info, nullptr, &res)) VK_NULL_HANDLE;
+	VkImageMemoryBarrier transition{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	transition.image = image;
+	transition.subresourceRange = subresource;
+	transition.srcAccessMask = layout_to_access(old_layout);
+	transition.dstAccessMask = layout_to_access(new_layout);
+	transition.oldLayout = old_layout;
+	transition.newLayout = new_layout;
 
-	return res.release();
-}
-
-void reshade::vulkan::runtime_vk::set_object_name(uint64_t handle, VkDebugReportObjectTypeEXT type, const char *name) const
-{
-#ifdef _DEBUG
-	if (vk.DebugMarkerSetObjectNameEXT == nullptr)
-		return;
-
-	VkDebugMarkerObjectNameInfoEXT name_info { VK_STRUCTURE_TYPE_DEBUG_MARKER_OBJECT_NAME_INFO_EXT };
-	name_info.object = handle;
-	name_info.objectType = type;
-	name_info.pObjectName = name;
-
-	vk.DebugMarkerSetObjectNameEXT(_device, &name_info);
-#endif
+	vk.CmdPipelineBarrier(cmd_list, layout_to_stage(old_layout), layout_to_stage(new_layout), 0, 0, nullptr, 0, nullptr, 1, &transition);
 }
 
 bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR &desc, HWND hwnd)
@@ -232,9 +284,6 @@ bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwap
 	_window_height = window_rect.bottom - window_rect.top;
 	_backbuffer_format = desc.imageFormat;
 	_color_bit_depth = _backbuffer_format >= VK_FORMAT_A2R10G10B10_UNORM_PACK32 && _backbuffer_format <= VK_FORMAT_A2B10G10R10_SINT_PACK32 ? 10 : 8;
-
-	const uint32_t queue_family_index = 0; // TODO
-	vk.GetDeviceQueue(_device, queue_family_index, 0, &_current_queue);
 
 	_backbuffer_texture = create_image(
 		_width, _height, 1, _backbuffer_format,
@@ -318,7 +367,6 @@ bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwap
 
 	_render_area = desc.imageExtent;
 
-	_cmd_pool.resize(num_images);
 	_swapchain_views.resize(num_images * 2);
 	_swapchain_frames.resize(num_images * 2);
 
@@ -346,9 +394,25 @@ bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwap
 
 			check_result(vk.CreateFramebuffer(_device, &create_info, nullptr, &_swapchain_frames[k + 1])) false;
 		}
+	}
+
+	// Reset pool index since a few command lists are created during initialization
+	_pool_index = 0;
+
+	const size_t NUM_COMMAND_FRAMES = 5;
+	_cmd_pool.resize(NUM_COMMAND_FRAMES);
+	_cmd_fences.resize(NUM_COMMAND_FRAMES);
+
+	for (size_t i = 0; i < NUM_COMMAND_FRAMES; ++i)
+	{
+		{   VkFenceCreateInfo create_info { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+			create_info.flags = VK_FENCE_CREATE_SIGNALED_BIT; // Create signaled so first status check in 'on_present' succeeds
+
+			check_result(vk.CreateFence(_device, &create_info, nullptr, &_cmd_fences[i])) false;
+		}
 
 		{   VkCommandPoolCreateInfo create_info { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-			create_info.queueFamilyIndex = queue_family_index;
+			create_info.queueFamilyIndex = _queue_family_index;
 
 			check_result(vk.CreateCommandPool(_device, &create_info, nullptr, &_cmd_pool[i])) false;
 		}
@@ -361,11 +425,11 @@ bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwap
 
 	{   const VkDescriptorPoolSize pool_sizes[] = {
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, // Only need one global UBO per set
-			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 128 } // Limit to 128 image bindings per set for now
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 128 } // TODO: Limit to 128 image bindings per set for now
 		};
 
 		VkDescriptorPoolCreateInfo create_info { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-		create_info.maxSets = 100; // Limit to 100 effects for now
+		create_info.maxSets = 100; // TODO: Limit to 100 effects for now
 		create_info.poolSizeCount = _countof(pool_sizes);
 		create_info.pPoolSizes = pool_sizes;
 
@@ -380,6 +444,18 @@ bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwap
 		check_result(vk.CreateDescriptorSetLayout(_device, &create_info, nullptr, &_effect_ubo_layout)) false;
 	}
 
+	_empty_depth_image = create_image(1, 1, 1, VK_FORMAT_R16_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	if (_empty_depth_image == VK_NULL_HANDLE)
+		return false;
+	_empty_depth_image_view = create_image_view(_empty_depth_image, VK_FORMAT_R16_UNORM, 1, VK_IMAGE_ASPECT_COLOR_BIT);
+	if (_empty_depth_image_view == VK_NULL_HANDLE)
+		return false;
+	if (VkCommandBuffer cmd_list = create_command_list(); cmd_list != VK_NULL_HANDLE)
+	{
+		transition_layout(cmd_list, _empty_depth_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		execute_command_list(cmd_list);
+	}
+
 #if RESHADE_GUI
 	if (!init_imgui_resources())
 		return false;
@@ -391,7 +467,7 @@ void reshade::vulkan::runtime_vk::on_reset()
 {
 	runtime::on_reset();
 
-	vk.DeviceWaitIdle(_device);
+	wait_for_command_queue(); // Make sure none of the resources below are currently in use
 
 	vk.DestroyDescriptorSetLayout(_device, _effect_ubo_layout, nullptr);
 	_effect_ubo_layout = VK_NULL_HANDLE;
@@ -409,12 +485,20 @@ void reshade::vulkan::runtime_vk::on_reset()
 	vk.DestroyImage(_device, _default_depthstencil, nullptr);
 	_default_depthstencil = VK_NULL_HANDLE;
 
-	vk.DestroyImageView(_device, _depthstencil_shader_view, nullptr);
-	_depthstencil_shader_view = VK_NULL_HANDLE;
+	vk.DestroyImageView(_device, _empty_depth_image_view, nullptr);
+	_empty_depth_image_view = VK_NULL_HANDLE;
+	vk.DestroyImage(_device, _empty_depth_image, nullptr);
+	_empty_depth_image = VK_NULL_HANDLE;
 
-	for (const auto &it : _depth_texture_saves)
+	vk.DestroyImageView(_device, _depth_image_view, nullptr);
+	_depth_image_view = VK_NULL_HANDLE;
+
+#if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
+	_depth_image_override = VK_NULL_HANDLE;
+	for (const auto &it : _saved_depth_textures)
 		vk.DestroyImage(_device, it.second, nullptr);
-	_depth_texture_saves.clear();
+	_saved_depth_textures.clear();
+#endif
 
 	vk.DestroyRenderPass(_device, _default_render_pass[0], nullptr);
 	_default_render_pass[0] = VK_NULL_HANDLE;
@@ -430,40 +514,42 @@ void reshade::vulkan::runtime_vk::on_reset()
 
 	vk.DestroyFence(_device, _wait_fence, nullptr);
 	_wait_fence = VK_NULL_HANDLE;
+	for (VkFence fence : _cmd_fences)
+		vk.DestroyFence(_device, fence, nullptr);
+	_cmd_fences.clear();
 	for (VkCommandPool pool : _cmd_pool)
 		vk.DestroyCommandPool(_device, pool, nullptr);
 	_cmd_pool.clear();
-
-	clear_DSV_iter = 1;
+	_cmd_buffers.clear();
 
 #if RESHADE_GUI
+	vk.FreeMemory(_device, _imgui_index_mem, nullptr);
+	_imgui_index_mem = VK_NULL_HANDLE;
+	vk.DestroyBuffer(_device, _imgui_index_buffer, nullptr);
+	_imgui_index_buffer = VK_NULL_HANDLE;
+	_imgui_index_buffer_size = 0;
+	vk.FreeMemory(_device, _imgui_vertex_mem, nullptr);
+	_imgui_vertex_mem = VK_NULL_HANDLE;
+	vk.DestroyBuffer(_device, _imgui_vertex_buffer, nullptr);
+	_imgui_vertex_buffer = VK_NULL_HANDLE;
+	_imgui_vertex_buffer_size = 0;
+
 	vk.DestroyPipeline(_device, _imgui_pipeline, nullptr);
 	_imgui_pipeline = VK_NULL_HANDLE;
 	vk.DestroyPipelineLayout(_device, _imgui_pipeline_layout, nullptr);
 	_imgui_pipeline_layout = VK_NULL_HANDLE;
 	vk.DestroyDescriptorSetLayout(_device, _imgui_descriptor_set_layout, nullptr);
 	_imgui_descriptor_set_layout = VK_NULL_HANDLE;
-
 	vk.DestroySampler(_device, _imgui_font_sampler, nullptr);
 	_imgui_font_sampler = VK_NULL_HANDLE;
-	vk.DestroyBuffer(_device, _imgui_index_buffer, nullptr);
-	_imgui_index_buffer = VK_NULL_HANDLE;
-	_imgui_index_buffer_size = 0;
-	vk.DestroyBuffer(_device, _imgui_vertex_buffer, nullptr);
-	_imgui_vertex_buffer = VK_NULL_HANDLE;
-	_imgui_vertex_buffer_size = 0;
-	vk.FreeMemory(_device, _imgui_vertex_mem, nullptr);
-	_imgui_vertex_mem = VK_NULL_HANDLE;
 #endif
 
 	for (VkDeviceMemory allocation : _allocations)
 		vk.FreeMemory(_device, allocation, nullptr);
 	_allocations.clear();
-
-	_is_multisampling_enabled = false;
 }
 
-void reshade::vulkan::runtime_vk::on_present(uint32_t swapchain_image_index, draw_call_tracker &tracker)
+void reshade::vulkan::runtime_vk::on_present(VkQueue queue, uint32_t swapchain_image_index, draw_call_tracker &tracker)
 {
 	if (!_is_initialized)
 		return;
@@ -473,24 +559,40 @@ void reshade::vulkan::runtime_vk::on_present(uint32_t swapchain_image_index, dra
 	_current_tracker = &tracker;
 
 	_swap_index = swapchain_image_index;
+	_pool_index = static_cast<uint32_t>(_framecount % _cmd_fences.size());
+	const VkFence fence = _cmd_fences[_pool_index];
 
-	// vk.QueueWaitIdle(_current_queue); // TODO
+	// Make sure all buffers from the command pool used this frame have finished before resetting it
+	if (vk.GetFenceStatus(_device, fence) != VK_SUCCESS)
+	{
+		LOG(WARN) << "Command pool still has buffers in flight. Skipping frame ...";
+		return;
+	}
+
+	vk.ResetFences(_device, 1, &fence);
+	vk.ResetCommandPool(_device, _cmd_pool[_pool_index], 0);
+
+#if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
+	const auto best_snapshot = tracker.find_best_depth_texture(_width, _height);
+	update_depthstencil_image(best_snapshot.image, best_snapshot.image_layout, best_snapshot.image_info.format);
+#endif
 
 	update_and_render_effects();
 
-#if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
-	detect_depth_source(tracker);
-#endif
-
 	runtime::on_present();
 
-	clear_DSV_iter = 1;
-	_current_tracker->reset();
+	// Submit all asynchronous command buffers in one batch to the current queue
+	{   VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+		submit_info.commandBufferCount = uint32_t(_cmd_buffers.size());
+		submit_info.pCommandBuffers = _cmd_buffers.data();
 
-	if (_framecount % 5000)
-		return;
+		vk.QueueSubmit(queue, 1, &submit_info, fence);
 
-	vk.ResetCommandPool(_device, _cmd_pool[swapchain_image_index], 0);
+		_cmd_buffers.clear();
+	}
+
+	// Signal that all fences are currently enqueued, so can be waited upon (see 'wait_for_finish')
+	_pool_index = std::numeric_limits<uint32_t>::max();
 }
 
 bool reshade::vulkan::runtime_vk::capture_screenshot(uint8_t *buffer) const
@@ -655,7 +757,17 @@ bool reshade::vulkan::runtime_vk::init_texture(texture &info)
 	if (impl->image == VK_NULL_HANDLE)
 		return false;
 
-	set_object_name((uint64_t)impl->image, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, info.unique_name.c_str());
+#ifdef _DEBUG
+	if (vk.DebugMarkerSetObjectNameEXT != nullptr)
+	{
+		VkDebugMarkerObjectNameInfoEXT name_info{ VK_STRUCTURE_TYPE_DEBUG_MARKER_OBJECT_NAME_INFO_EXT };
+		name_info.object = (uint64_t)impl->image;
+		name_info.objectType = VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT;
+		name_info.pObjectName = info.unique_name.c_str();
+
+		vk.DebugMarkerSetObjectNameEXT(_device, &name_info);
+	}
+#endif
 
 	// Create shader views
 	impl->view[0] = create_image_view(impl->image, impl->formats[0], VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -795,9 +907,11 @@ void reshade::vulkan::runtime_vk::generate_mipmaps(const VkCommandBuffer cmd_lis
 
 VkCommandBuffer reshade::vulkan::runtime_vk::create_command_list(VkCommandBufferLevel level) const
 {
+	assert(_pool_index < _cmd_pool.size());
+
 	VkCommandBuffer cmd_list = VK_NULL_HANDLE;
 	VkCommandBufferAllocateInfo alloc_info { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-	alloc_info.commandPool = _cmd_pool[_swap_index];
+	alloc_info.commandPool = _cmd_pool[_pool_index];
 	alloc_info.level = level;
 	alloc_info.commandBufferCount = 1;
 
@@ -819,77 +933,45 @@ void reshade::vulkan::runtime_vk::execute_command_list(VkCommandBuffer cmd_list)
 {
 	check_result(vk.EndCommandBuffer(cmd_list));
 
-	VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers = &cmd_list;
+	_cmd_buffers.push_back(cmd_list);
 
-	assert(_current_queue != VK_NULL_HANDLE);
-	VkResult res = vk.QueueSubmit(_current_queue, 1, &submit_info, _wait_fence);
+	// Submit all current command buffers in one batch
+	VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submit_info.commandBufferCount = uint32_t(_cmd_buffers.size());
+	submit_info.pCommandBuffers = _cmd_buffers.data();
+
+	// Can use the main queue here, since it is immediately synchronized with the host again anyway
+	VkResult res;
+	res = vk.QueueSubmit(_main_queue, 1, &submit_info, _wait_fence);
 	assert(res == VK_SUCCESS);
 	res = vk.WaitForFences(_device, 1, &_wait_fence, VK_TRUE, UINT64_MAX);
 	assert(res == VK_SUCCESS);
 	res = vk.ResetFences(_device, 1, &_wait_fence);
 	assert(res == VK_SUCCESS);
+
+	_cmd_buffers.clear();
 }
 void reshade::vulkan::runtime_vk::execute_command_list_async(VkCommandBuffer cmd_list) const
 {
 	check_result(vk.EndCommandBuffer(cmd_list));
 
-	VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers = &cmd_list;
-
-	assert(_current_queue != VK_NULL_HANDLE);
-	VkResult res = vk.QueueSubmit(_current_queue, 1, &submit_info, VK_NULL_HANDLE);
-	assert(res == VK_SUCCESS);
+	_cmd_buffers.push_back(cmd_list);
 }
-
-void reshade::vulkan::runtime_vk::transition_layout(VkCommandBuffer cmd_list, VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkImageSubresourceRange subresource) const
+void reshade::vulkan::runtime_vk::wait_for_command_queue()
 {
-	const auto layout_to_access = [](VkImageLayout layout) -> VkAccessFlags {
-		switch (layout)
-		{
-		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-			return VK_ACCESS_TRANSFER_READ_BIT;
-		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-			return VK_ACCESS_TRANSFER_WRITE_BIT;
-		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-			return VK_ACCESS_SHADER_READ_BIT;
-		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-			return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-		case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
-		case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
-			return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		}
-		return 0;
-	};
-	const auto layout_to_stage = [](VkImageLayout layout) -> VkPipelineStageFlags {
-		switch (layout)
-		{
-		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-			return VK_PIPELINE_STAGE_TRANSFER_BIT;
-		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-			return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-		case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
-		case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
-			return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-		}
-		return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-	};
+#if 1
+	vk.QueueWaitIdle(_main_queue);
+#else
+	std::vector<VkFence> pending_fences = _cmd_fences;
+	if (_pool_index != std::numeric_limits<uint32_t>::max())
+	{
+		// The current fence cannot be signaled at this point, since it is enqueued later in 'on_present', so remove it from the list of fences to wait on
+		pending_fences.erase(pending_fences.begin() + _pool_index);
+	}
 
-	VkImageMemoryBarrier transition { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-	transition.image = image;
-	transition.subresourceRange = subresource;
-	transition.srcAccessMask = layout_to_access(old_layout);
-	transition.dstAccessMask = layout_to_access(new_layout);
-	transition.oldLayout = old_layout;
-	transition.newLayout = new_layout;
-
-	vk.CmdPipelineBarrier(cmd_list, layout_to_stage(old_layout), layout_to_stage(new_layout), 0, 0, nullptr, 0, nullptr, 1, &transition);
+	// Wait on all remaining fences (with a timeout of 1 second to be safe)
+	vk.WaitForFences(_device, uint32_t(pending_fences.size()), pending_fences.data(), VK_TRUE, 1'000'000'000);
+#endif
 }
 
 bool reshade::vulkan::runtime_vk::compile_effect(effect_data &effect)
@@ -969,12 +1051,10 @@ bool reshade::vulkan::runtime_vk::compile_effect(effect_data &effect)
 			image_binding.imageView = _backbuffer_texture_view[info.srgb];
 			break;
 		case texture_reference::depth_buffer:
-			if (_depthstencil_shader_view == VK_NULL_HANDLE)
-				// Set to a default view to avoid crash because of this being null
-				// TODO: Back buffer is not really a great choice here ...
-				image_binding.imageView = _backbuffer_texture_view[0];
-			else
-				image_binding.imageView = _depthstencil_shader_view;
+			if (_depth_image_view != VK_NULL_HANDLE)
+				image_binding.imageView = _depth_image_view;
+			else // Set to a default view to avoid crash because of this being null
+				image_binding.imageView = _empty_depth_image_view;
 			// Keep track of the depth buffer texture descriptor to simplify updating it
 			effect_data.depth_image_binding = info.binding;
 			break;
@@ -1116,19 +1196,20 @@ bool reshade::vulkan::runtime_vk::compile_effect(effect_data &effect)
 }
 void reshade::vulkan::runtime_vk::unload_effect(size_t id)
 {
-	// Wait for all GPU operations to finish so resources are no longer referenced
-	vk.DeviceWaitIdle(_device);
+	wait_for_command_queue(); // Make sure no effect resources are currently in use
 
 	runtime::unload_effect(id);
 }
 void reshade::vulkan::runtime_vk::unload_effects()
 {
-	// Wait for all GPU operations to finish so resources are no longer referenced
-	vk.DeviceWaitIdle(_device);
+	wait_for_command_queue(); // Make sure no effect resources are currently in use
 
 	runtime::unload_effects();
 
-	vk.ResetDescriptorPool(_device, _effect_descriptor_pool, 0);
+	if (_effect_descriptor_pool != VK_NULL_HANDLE)
+	{
+		vk.ResetDescriptorPool(_device, _effect_descriptor_pool, 0);
+	}
 
 	for (const vulkan_effect_data &data : _effect_data)
 	{
@@ -1430,10 +1511,10 @@ void reshade::vulkan::runtime_vk::render_technique(technique &technique)
 	vk.CmdClearDepthStencilImage(cmd_list, _default_depthstencil, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_value, 1, &clear_range);
 	transition_layout(cmd_list, _default_depthstencil, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL, { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 });
 
-	if (_depthstencil_image != VK_NULL_HANDLE)
+	if (_depth_image != VK_NULL_HANDLE)
 	{
 		// Transition layout of depth stencil image
-		transition_layout(cmd_list, _depthstencil_image, _depthstencil_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, { _depthstencil_aspect, 0, 1, 0, 1 });
+		transition_layout(cmd_list, _depth_image, _depth_image_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, { _depth_image_aspect, 0, 1, 0, 1 });
 	}
 
 	for (size_t i = 0; i < technique.passes.size(); ++i)
@@ -1480,12 +1561,12 @@ void reshade::vulkan::runtime_vk::render_technique(technique &technique)
 		}
 	}
 
-	if (_depthstencil_image != VK_NULL_HANDLE)
+	if (_depth_image != VK_NULL_HANDLE)
 	{
-		assert(_depthstencil_layout != VK_IMAGE_LAYOUT_UNDEFINED);
+		assert(_depth_image_layout != VK_IMAGE_LAYOUT_UNDEFINED);
 
 		// Reset image layout of depth stencil image
-		transition_layout(cmd_list, _depthstencil_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, _depthstencil_layout, { _depthstencil_aspect, 0, 1, 0, 1 });
+		transition_layout(cmd_list, _depth_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, _depth_image_layout, { _depth_image_aspect, 0, 1, 0, 1 });
 	}
 
 	execute_command_list_async(cmd_list);
@@ -1647,72 +1728,52 @@ bool reshade::vulkan::runtime_vk::init_imgui_resources()
 
 void reshade::vulkan::runtime_vk::render_imgui_draw_data(ImDrawData *draw_data)
 {
+	// Need to multi-buffer vertex data so not to modify data below when the previous frame is still in flight
+	const unsigned int buffer_index = _framecount % IMGUI_BUFFER_COUNT;
+
 	// Attempt to allocate memory if it failed previously
-	bool resize_mem = _imgui_vertex_mem == VK_NULL_HANDLE;
+	bool resize_mem = _imgui_index_buffer == VK_NULL_HANDLE || _imgui_vertex_buffer == VK_NULL_HANDLE;
 
 	// Create and grow vertex/index buffers if needed
-	if (_imgui_index_buffer_size < uint32_t(draw_data->TotalIdxCount))
+	if (_imgui_index_buffer_size < draw_data->TotalIdxCount * sizeof(ImDrawIdx))
 	{
 		resize_mem = true;
-		_imgui_index_buffer_size = draw_data->TotalIdxCount + 10000;
+		_imgui_index_buffer_size = (draw_data->TotalIdxCount + 10000) * sizeof(ImDrawIdx);
 	}
-	if (_imgui_vertex_buffer_size < uint32_t(draw_data->TotalVtxCount))
+	if (_imgui_vertex_buffer_size < draw_data->TotalVtxCount * sizeof(ImDrawVert))
 	{
 		resize_mem = true;
-		_imgui_vertex_buffer_size = draw_data->TotalVtxCount + 5000;
+		_imgui_vertex_buffer_size = (draw_data->TotalVtxCount + 5000) * sizeof(ImDrawVert);
 	}
 
 	if (resize_mem)
 	{
-		// Make sure the previous frame has finished using the buffers before freeing them
-		vk.QueueWaitIdle(_current_queue);
+		wait_for_command_queue(); // Make sure memory is not currently in use before freeing it
 
-		// Free allocated memory associated with vertex/index buffers
+		vk.FreeMemory(_device, _imgui_index_mem, nullptr);
+		_imgui_index_mem = VK_NULL_HANDLE;
+		vk.DestroyBuffer(_device, _imgui_index_buffer, nullptr);
+		_imgui_index_buffer = create_buffer(_imgui_index_buffer_size * IMGUI_BUFFER_COUNT, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+		if (_imgui_index_buffer == VK_NULL_HANDLE)
+			return;
+		_imgui_index_mem = _allocations.back();
+		_allocations.pop_back();
+
 		vk.FreeMemory(_device, _imgui_vertex_mem, nullptr);
 		_imgui_vertex_mem = VK_NULL_HANDLE;
-
-		// Re-create the buffer objects
-		vk.DestroyBuffer(_device, _imgui_index_buffer, nullptr);
 		vk.DestroyBuffer(_device, _imgui_vertex_buffer, nullptr);
-
-		_imgui_index_buffer = create_buffer(_imgui_index_buffer_size * sizeof(ImDrawIdx), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-		_imgui_vertex_buffer = create_buffer(_imgui_vertex_buffer_size * sizeof(ImDrawVert), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-
-		if (_imgui_index_buffer == VK_NULL_HANDLE ||
-			_imgui_vertex_buffer == VK_NULL_HANDLE)
+		_imgui_vertex_buffer = create_buffer(_imgui_vertex_buffer_size * IMGUI_BUFFER_COUNT, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+		if (_imgui_vertex_buffer == VK_NULL_HANDLE)
 			return;
-
-		VkMemoryRequirements index_reqs = {};
-		vk.GetBufferMemoryRequirements(_device, _imgui_index_buffer, &index_reqs);
-		VkMemoryRequirements vertex_reqs = {};
-		vk.GetBufferMemoryRequirements(_device, _imgui_vertex_buffer, &vertex_reqs);
-
-		VkMemoryAllocateInfo alloc_info { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-		alloc_info.allocationSize = index_reqs.size + vertex_reqs.size;
-		alloc_info.memoryTypeIndex = find_memory_type_index(_memory_props,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, index_reqs.memoryTypeBits & vertex_reqs.memoryTypeBits);
-
-		if (alloc_info.memoryTypeIndex == std::numeric_limits<uint32_t>::max())
-			return;
-
-		check_result(vk.AllocateMemory(_device, &alloc_info, nullptr, &_imgui_vertex_mem));
-
-		VkBindBufferMemoryInfo bind_infos[2];
-		bind_infos[0] = { VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
-		bind_infos[0].buffer = _imgui_index_buffer;
-		bind_infos[0].memory = _imgui_vertex_mem;
-		bind_infos[0].memoryOffset = 0;
-		bind_infos[1] = { VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
-		bind_infos[1].buffer = _imgui_vertex_buffer;
-		bind_infos[1].memory = _imgui_vertex_mem;
-		bind_infos[1].memoryOffset = _imgui_vertex_mem_offset = index_reqs.size;
-
-		check_result(vk.BindBufferMemory2(_device, _countof(bind_infos), bind_infos));
+		_imgui_vertex_mem = _allocations.back();
+		_allocations.pop_back();
 	}
 
+	// Map only the memory portion associated with the current frame
 	ImDrawIdx *idx_dst; ImDrawVert *vtx_dst;
-	check_result(vk.MapMemory(_device, _imgui_vertex_mem, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void **>(&idx_dst)));
-	vtx_dst = reinterpret_cast<ImDrawVert *>(reinterpret_cast<uint8_t *>(idx_dst) + _imgui_vertex_mem_offset);
+	// TODO: Index buffer is never unmapped in case of failure when mapping vertex buffer
+	check_result(vk.MapMemory(_device, _imgui_index_mem, _imgui_index_buffer_size * buffer_index, _imgui_index_buffer_size, 0, reinterpret_cast<void **>(&idx_dst)));
+	check_result(vk.MapMemory(_device, _imgui_vertex_mem, _imgui_vertex_buffer_size * buffer_index, _imgui_vertex_buffer_size, 0, reinterpret_cast<void **>(&vtx_dst)));
 
 	for (int n = 0; n < draw_data->CmdListsCount; n++)
 	{
@@ -1723,6 +1784,7 @@ void reshade::vulkan::runtime_vk::render_imgui_draw_data(ImDrawData *draw_data)
 		vtx_dst += draw_list->VtxBuffer.Size;
 	}
 
+	vk.UnmapMemory(_device, _imgui_index_mem);
 	vk.UnmapMemory(_device, _imgui_vertex_mem);
 
 	const VkCommandBuffer cmd_list = create_command_list();
@@ -1749,9 +1811,11 @@ void reshade::vulkan::runtime_vk::render_imgui_draw_data(ImDrawData *draw_data)
 	vk.CmdPushConstants(cmd_list, _imgui_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, sizeof(float) * 2, translate);
 
 	// Setup render state and render draw lists
-	vk.CmdBindIndexBuffer(cmd_list, _imgui_index_buffer, 0, sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-	const VkDeviceSize offset = 0;
-	vk.CmdBindVertexBuffers(cmd_list, 0, 1, &_imgui_vertex_buffer, &offset);
+	const VkDeviceSize index_offset = buffer_index * _imgui_index_buffer_size;
+	const VkDeviceSize vertex_offset = buffer_index * _imgui_vertex_buffer_size;
+	vk.CmdBindIndexBuffer(cmd_list, _imgui_index_buffer, index_offset, sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+	vk.CmdBindVertexBuffers(cmd_list, 0, 1, &_imgui_vertex_buffer, &vertex_offset);
+
 	const VkViewport viewport = { 0.0f, 0.0f, draw_data->DisplaySize.x, draw_data->DisplaySize.y, 0.0f, 1.0f };
 	vk.CmdSetViewport(cmd_list, 0, 1, &viewport);
 	vk.CmdBindPipeline(cmd_list, VK_PIPELINE_BIND_POINT_GRAPHICS, _imgui_pipeline);
@@ -1801,105 +1865,94 @@ void reshade::vulkan::runtime_vk::render_imgui_draw_data(ImDrawData *draw_data)
 
 void reshade::vulkan::runtime_vk::draw_debug_menu()
 {
-	ImGui::Text("MSAA is %s", _is_multisampling_enabled ? "active" : "inactive");
-	ImGui::Spacing();
-
-	ImGui::Spacing();
-	ImGui::Spacing();
-
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
-	if (ImGui::CollapsingHeader("Depth and Intermediate Buffers", ImGuiTreeNodeFlags_DefaultOpen))
+	if (ImGui::CollapsingHeader("Depth Buffers", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		bool modified = false;
-		modified |= ImGui::Combo("Depth Texture Format", &depth_buffer_texture_format, "All\0D16\0D16S8\0D24S8\0D32F\0D32FS8\0");
+		modified |= ImGui::Combo("Depth texture format", (int*)&draw_call_tracker::filter_depth_texture_format, "All\0D16\0D16S8\0D24S8\0D32F\0D32FS8\0");
+		modified |= ImGui::Checkbox("Use aspect ratio heuristics", &draw_call_tracker::filter_aspect_ratio);
+		modified |= ImGui::Checkbox("Copy depth buffers before clear operation", &draw_call_tracker::preserve_depth_buffers);
 
-		if (modified)
+		if (modified) // Detection settings have changed, reset override
+			_depth_image_override = VK_NULL_HANDLE;
+
+		if (draw_call_tracker::preserve_depth_buffers)
 		{
-			runtime::save_config();
-			_current_tracker->reset();
-			update_depthstencil_image(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED);
-			return;
-		}
-
-		modified |= ImGui::Checkbox("Copy depth buffer just before it is cleared", &depth_buffer_before_clear);
-
-		if (depth_buffer_before_clear)
-		{
-			ImGui::Spacing();
-			ImGui::Spacing();
-
-			if (ImGui::Checkbox("Make more copies (can help if not retrieving the depth buffer in the current copies)", &depth_buffer_more_copies))
+			if (ImGui::Checkbox("Copy depth buffers before stencil clear operation too", &draw_call_tracker::preserve_stencil_buffers))
 			{
-				cleared_depth_buffer_index = 0;
+				draw_call_tracker::depth_stencil_clear_index = 0;
 				modified = true;
 			}
 
 			ImGui::Spacing();
+			ImGui::Separator();
 			ImGui::Spacing();
 
-			if (ImGui::Checkbox("Extended depth buffer detection", &extended_depth_buffer_detection))
-			{
-				cleared_depth_buffer_index = 0;
-				modified = true;
-			}
+			unsigned int current_clear_index = draw_call_tracker::depth_stencil_clear_index;
+			if (current_clear_index == 0)
+				// The current clear index corresponds to the last matching cleared depth texture
+				for (const auto &[clear_index, snapshot] : _current_tracker->cleared_depth_images())
+					if (snapshot.backup_image == _depth_image)
+						current_clear_index = clear_index;
 
-			_current_tracker->keep_cleared_depth_textures();
-
-			ImGui::Spacing();
-			ImGui::TextUnformatted("Depth Buffers:");
-
-			unsigned int current_index = 1;
-
-			for (const auto &it : _current_tracker->cleared_depth_textures())
+			for (const auto &[clear_index, snapshot] : _current_tracker->cleared_depth_images())
 			{
 				char label[512] = "";
-				sprintf_s(label, "%s%2u", (current_index == cleared_depth_buffer_index ? "> " : "  "), current_index);
+				sprintf_s(label, "%s%2u", (clear_index == current_clear_index ? "> " : "  "), clear_index);
 
-				if (bool value = cleared_depth_buffer_index == current_index; ImGui::Checkbox(label, &value))
+				if (bool value = draw_call_tracker::depth_stencil_clear_index == clear_index;
+					ImGui::Checkbox(label, &value))
 				{
-					cleared_depth_buffer_index = value ? current_index : 0;
+					draw_call_tracker::depth_stencil_clear_index = value ? clear_index : 0;
 					modified = true;
 				}
 
 				ImGui::SameLine();
-
-				ImGui::Text("=> 0x%p | %ux%u", it.second.src_image, it.second.src_image_info.extent.width, it.second.src_image_info.extent.height);
-
-				if (it.second.dest_image != VK_NULL_HANDLE)
-				{
-					ImGui::SameLine();
-
-					ImGui::Text("=> %p", it.second.dest_image);
-				}
-
-				current_index++;
+				ImGui::Text("=> 0x%016llx | %4ux%-4u |", (uint64_t)snapshot.src_image, snapshot.image_info.extent.width, snapshot.image_info.extent.height);
 			}
 		}
-		else if (!_current_tracker->depth_buffer_counters().empty())
+		else
 		{
 			ImGui::Spacing();
-			ImGui::TextUnformatted("Depth Buffers: (intermediate buffer draw calls in parentheses)");
+			ImGui::Separator();
+			ImGui::Spacing();
 
 			for (const auto &[depthstencil, snapshot] : _current_tracker->depth_buffer_counters())
 			{
 				char label[512] = "";
-				sprintf_s(label, "%s0x%p", (depthstencil == _depthstencil_image ? "> " : "  "), depthstencil);
+				sprintf_s(label, "%s0x%016llx", (depthstencil == _depth_image ? "> " : "  "), (uint64_t)depthstencil);
 
-				if (bool value = _best_depth_stencil_overwrite == depthstencil; ImGui::Checkbox(label, &value))
+				const bool disabled = snapshot.image_info.samples != VK_SAMPLE_COUNT_1_BIT || !draw_call_tracker::check_texture_format(snapshot.image_info);
+				if (disabled) // Disable widget for MSAA textures
 				{
-					_best_depth_stencil_overwrite = value ? depthstencil : VK_NULL_HANDLE;
+					ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+					ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+				}
 
-					if (_best_depth_stencil_overwrite != VK_NULL_HANDLE)
-						update_depthstencil_image(_best_depth_stencil_overwrite, snapshot.layout, snapshot.create_info.format);
+				if (bool value = _depth_image_override == depthstencil;
+					ImGui::Checkbox(label, &value))
+				{
+					_depth_image_override = value ? depthstencil : VK_NULL_HANDLE;
+
+					if (value)
+						update_depthstencil_image(depthstencil, snapshot.image_layout, snapshot.image_info.format);
 				}
 
 				ImGui::SameLine();
+				ImGui::Text("| %4ux%-4u | %5u draw calls ==> %8u vertices |%s",
+					snapshot.image_info.extent.width, snapshot.image_info.extent.height, snapshot.stats.drawcalls, snapshot.stats.vertices, (snapshot.image_info.samples != VK_SAMPLE_COUNT_1_BIT ? " MSAA" : ""));
 
-				VkExtent3D extent = snapshot.create_info.extent;
-
-				ImGui::Text("| %ux%u| %5u draw calls ==> %8u vertices", extent.width, extent.height, snapshot.stats.drawcalls, snapshot.stats.vertices);
+				if (disabled)
+				{
+					ImGui::PopStyleColor();
+					ImGui::PopItemFlag();
+				}
 			}
 		}
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
 
 		if (modified)
 			runtime::save_config();
@@ -1909,53 +1962,32 @@ void reshade::vulkan::runtime_vk::draw_debug_menu()
 #endif
 
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
-void reshade::vulkan::runtime_vk::detect_depth_source(draw_call_tracker &tracker)
+void reshade::vulkan::runtime_vk::update_depthstencil_image(VkImage image, VkImageLayout layout, VkFormat image_format)
 {
-	if (depth_buffer_before_clear)
-		_best_depth_stencil_overwrite = VK_NULL_HANDLE;
-
-	if (_is_multisampling_enabled || _best_depth_stencil_overwrite != VK_NULL_HANDLE || (_framecount % 30 && !depth_buffer_before_clear))
+	if (_depth_image_override != VK_NULL_HANDLE && image != _depth_image_override)
 		return;
 
-	if (depth_buffer_before_clear)
-	{
-		// At the final rendering stage, it is fine to rely on the depth stencil to select the best depth texture
-		// But when we retrieve the depth textures before the final rendering stage, there is chance that one or many different depth textures are associated to the same depth stencil (for instance, in Bioshock 2)
-		// In this case, we cannot use the depth stencil to determine which depth texture is the good one, so we can use the default depth stencil
-		// For the moment, the best we can do is retrieve all the depth textures that has been cleared in the rendering pipeline, then select one of them (by default, the last one)
-		// In the future, maybe we could find a way to retrieve depth texture statistics (number of draw calls and number of vertices), so ReShade could automatically select the best one
-		const auto best_match = tracker.find_best_cleared_depth_buffer_image(cleared_depth_buffer_index);
-		if (best_match.image != VK_NULL_HANDLE)
-			update_depthstencil_image(best_match.image, best_match.layout, best_match.image_info.format);
-	}
-	else
-	{
-		const auto best_snapshot = tracker.find_best_snapshot(_width, _height);
-		if (best_snapshot.depthstencil != VK_NULL_HANDLE && best_snapshot.depthstencil != _depthstencil_image)
-			update_depthstencil_image(best_snapshot.depthstencil, best_snapshot.layout, best_snapshot.create_info.format);
-	}
-}
+	if (image == _depth_image)
+		return;
 
-void reshade::vulkan::runtime_vk::update_depthstencil_image(VkImage depthstencil, VkImageLayout layout, VkFormat image_format)
-{
-	assert(layout != VK_IMAGE_LAYOUT_UNDEFINED || depthstencil == VK_NULL_HANDLE);
+	assert(layout != VK_IMAGE_LAYOUT_UNDEFINED || image == VK_NULL_HANDLE);
 
-	_depthstencil_image = depthstencil;
-	_depthstencil_layout = layout;
-	_depthstencil_aspect = aspect_flags_from_format(image_format);
+	_depth_image = image;
+	_depth_image_layout = layout;
+	_depth_image_aspect = aspect_flags_from_format(image_format);
 
-	// Make sure the previous frame has finished before freeing the image view and updating descriptors (since they may be in use otherwise)
-	vk.QueueWaitIdle(_current_queue);
+	// Make sure all previous frames have finished before freeing the image view and updating descriptors (since they may be in use otherwise)
+	wait_for_command_queue();
 
-	vk.DestroyImageView(_device, _depthstencil_shader_view, nullptr);
-	_depthstencil_shader_view = VK_NULL_HANDLE;
+	vk.DestroyImageView(_device, _depth_image_view, nullptr);
+	_depth_image_view = VK_NULL_HANDLE;
 
 	VkDescriptorImageInfo image_binding = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-	if (depthstencil != VK_NULL_HANDLE)
+	if (image != VK_NULL_HANDLE)
 	{
-		_depthstencil_shader_view = create_image_view(depthstencil, image_format, 1, VK_IMAGE_ASPECT_DEPTH_BIT);
-		image_binding.imageView = _depthstencil_shader_view;
+		_depth_image_view = create_image_view(image, image_format, 1, VK_IMAGE_ASPECT_DEPTH_BIT);
+		image_binding.imageView = _depth_image_view;
 
 		for (auto &tex : _textures)
 		{
@@ -1968,8 +2000,7 @@ void reshade::vulkan::runtime_vk::update_depthstencil_image(VkImage depthstencil
 	}
 	else
 	{
-		// TODO: As above, this should be something else
-		image_binding.imageView = _backbuffer_texture_view[0];
+		image_binding.imageView = _empty_depth_image_view;
 	}
 
 	// Update image bindings
@@ -1999,23 +2030,23 @@ void reshade::vulkan::runtime_vk::update_depthstencil_image(VkImage depthstencil
 	vk.UpdateDescriptorSets(_device, uint32_t(writes.size()), writes.data(), 0, nullptr);
 }
 
-VkImage reshade::vulkan::runtime_vk::select_depth_texture_save(const VkImageCreateInfo &create_info)
+VkImage reshade::vulkan::runtime_vk::create_compatible_image(const VkImageCreateInfo &create_info)
 {
 	// Create an unique index based on the texture format and dimensions
-	uint64_t idx = create_info.format * create_info.extent.width * create_info.extent.height;
+	const uint32_t hash = create_info.format * create_info.extent.width * create_info.extent.height;
 
-	if (const auto it = _depth_texture_saves.find(idx); it != _depth_texture_saves.end())
+	if (const auto it = _saved_depth_textures.find(hash); it != _saved_depth_textures.end())
 		return it->second;
 
-	VkImage depth_texture_save = create_image(create_info.extent.width, create_info.extent.height, 1, create_info.format, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	if (depth_texture_save == VK_NULL_HANDLE)
+	VkImage image = create_image(create_info.extent.width, create_info.extent.height, 1, create_info.format, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	if (image == VK_NULL_HANDLE)
 	{
 		LOG(ERROR) << "Failed to create depth texture copy!";
 		return VK_NULL_HANDLE;
 	}
 
-	_depth_texture_saves.emplace(idx, depth_texture_save);
+	_saved_depth_textures.emplace(hash, image);
 
-	return depth_texture_save;
+	return image;
 }
 #endif
