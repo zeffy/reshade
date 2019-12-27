@@ -1,6 +1,6 @@
 /**
- * Copyright (C) 2018 Patrick Mours
  * Copyright (C) 2017 BalazsJako
+ * Copyright (C) 2018 Patrick Mours
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +21,7 @@
  * SOFTWARE.
  */
 
-#include "gui_code_editor.hpp"
+#include "imgui_editor.hpp"
 #include "effect_lexer.hpp"
 #include <imgui.h>
 
@@ -82,10 +82,15 @@ void imgui_code_editor::render(const char *title, bool border)
 {
 	assert(!_lines.empty());
 
+	// Get all the style values here, before they are overwritten via 'PushStyleVar'
+	const float button_size = ImGui::GetFrameHeight();
+	const float bottom_height = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+	const float button_spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::ColorConvertU32ToFloat4(_palette[color_background]));
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
 
-	ImGui::BeginChild(title, ImVec2(), border, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNavInputs);
+	ImGui::BeginChild(title, ImVec2(0, _search_window_open * -bottom_height), border, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNavInputs);
 	ImGui::PushAllowKeyboardFocus(true);
 
 	char buf[128] = "", *buf_end = buf;
@@ -115,7 +120,16 @@ void imgui_code_editor::render(const char *title, bool border)
 		io.WantTextInput = true;
 		io.WantCaptureKeyboard = true;
 
-		if (ctrl && !shift && !alt && ImGui::IsKeyPressed('Z'))
+		if (ctrl && !shift && !alt && (ImGui::IsKeyPressed('F') || ImGui::IsKeyPressed('H')))
+		{
+			// Copy currently selected text into search box
+			if (_select_beg != _select_end)
+				_search_text[get_selected_text().copy(_search_text, sizeof(_search_text) - 1)] = '\0';
+
+			_search_window_open = ImGui::IsKeyPressed('H') ? 2 /* search + replace */ : 1 /* search */;
+			_search_window_focus = 2; // Need to focus multiple frames (see https://github.com/ocornut/imgui/issues/343)
+		}
+		else if (ctrl && !shift && !alt && ImGui::IsKeyPressed('Z'))
 			undo();
 		else if (ctrl && !shift && !alt && ImGui::IsKeyPressed('Y'))
 			redo();
@@ -448,7 +462,8 @@ void imgui_code_editor::render(const char *title, bool border)
 		if (len + text_start > (ImGui::GetScrollX() + max_scroll_width - extra_space))
 			ImGui::SetScrollX(std::max(0.0f, len + text_start + extra_space - max_scroll_width));
 
-		ImGui::SetWindowFocus();
+		if (!_search_window_open) // Focus on search text box instead of the editor window
+			ImGui::SetWindowFocus();
 
 		_scroll_to_cursor = false;
 	}
@@ -458,6 +473,66 @@ void imgui_code_editor::render(const char *title, bool border)
 
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor();
+
+	if (_search_window_open)
+	{
+		ImGui::Dummy(ImVec2(0, ImGui::GetStyle().ItemSpacing.y));
+		ImGui::BeginChild("##search", ImVec2(0, 0));
+
+		const float input_width = ImGui::GetContentRegionAvail().x - (3 * button_spacing) - (3 * button_size);
+		ImGui::PushItemWidth(input_width);
+		if (ImGui::InputText("##search", _search_text, sizeof(_search_text), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput))
+		{
+			_search_window_focus = 1; // Focus text box again after entering a value
+			find_and_scroll_to_text(_search_text);
+		}
+		ImGui::PopItemWidth();
+
+		if (_search_window_focus != 0 && _search_window_focus < 3)
+		{
+			_search_window_focus -= 1;
+			ImGui::SetKeyboardFocusHere(-1);
+		}
+
+		ImGui::SameLine(0.0f, button_spacing);
+		if (ImGui::Button("<", ImVec2(button_size, 0)))
+			find_and_scroll_to_text(_search_text, true);
+		ImGui::SameLine(0.0f, button_spacing);
+		if (ImGui::Button(">", ImVec2(button_size, 0)))
+			find_and_scroll_to_text(_search_text, false);
+		ImGui::SameLine(0.0f, button_spacing);
+		if (ImGui::Button("X", ImVec2(button_size, 0)) || ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape)))
+			_search_window_open = _search_window_focus = 0;
+
+		if (_search_window_open != 1)
+		{
+			ImGui::PushItemWidth(input_width);
+			if (ImGui::InputText("##replace", _replace_text, sizeof(_replace_text), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput))
+			{
+				_search_window_focus = 3; // Focus replace text box again after entering a value
+				if (find_and_scroll_to_text(_search_text, false, true))
+					insert_text(_replace_text);
+			}
+			ImGui::PopItemWidth();
+
+			if (_search_window_focus == 3)
+			{
+				_search_window_focus  = 0;
+				ImGui::SetKeyboardFocusHere(-1);
+			}
+
+			ImGui::SameLine(0.0f, button_spacing);
+			if (ImGui::Button("R", ImVec2(button_size, 0)))
+				if (find_and_scroll_to_text(_search_text, false, true))
+					insert_text(_replace_text);
+			ImGui::SameLine(0.0f, button_spacing);
+			if (ImGui::Button("A", ImVec2(button_size, 0)))
+				while (find_and_scroll_to_text(_search_text, false, true))
+					insert_text(_replace_text);
+		}
+
+		ImGui::EndChild();
+	}
 }
 
 void imgui_code_editor::select(const text_pos &beg, const text_pos &end, selection_mode mode)
@@ -603,6 +678,9 @@ void imgui_code_editor::insert_character(char c, bool auto_indent)
 
 				if (ImGui::GetIO().KeyShift)
 				{
+					if (line.empty())
+						continue; // Line is already empty, so there is no indentation to remove
+
 					if (line[0].c == '\t')
 					{
 						line.erase(line.begin());
@@ -1337,6 +1415,116 @@ void imgui_code_editor::move_lines_down()
 	_select_beg.line++;
 	_select_end.line++;
 	_cursor_pos.line++;
+}
+
+bool imgui_code_editor::find_and_scroll_to_text(const std::string &text, bool backwards, bool with_selection)
+{
+	if (text.empty())
+		return false; // Cannot search for empty text
+
+	// Start search at the cursor position
+	text_pos match_pos_beg, search_pos = backwards != with_selection ? _select_beg : _select_end;
+
+	if (backwards)
+	{
+		const size_t match_last = text.size() - 1;
+		size_t match_offset = match_last;
+
+		while (true)
+		{
+			if (!_lines[search_pos.line].empty())
+			{
+				// Trim column index to the last character in the line (rather than the actual end)
+				search_pos.column = std::min(search_pos.column, _lines[search_pos.line].size() - 1);
+
+				while (true)
+				{
+					if (_lines[search_pos.line][search_pos.column].c == text[match_offset])
+					{
+						if (match_offset == match_last) // Keep track of end of the match
+							match_pos_beg = search_pos;
+
+						// All characters matching means the text was found, so select it and return
+						if (match_offset == 0)
+						{
+							_select_beg = search_pos;
+							_select_end = text_pos(match_pos_beg.line, match_pos_beg.column + 1);
+							_cursor_pos = _select_beg;
+							_scroll_to_cursor = true;
+							return true;
+						}
+						else
+						{
+							match_offset--;
+						}
+					}
+					else
+					{
+						// A character mismatched, so start from the end again
+						match_offset = match_last;
+					}
+
+					if (search_pos.column == 0)
+						break; // Reached the first column and cannot go further back, so break and go up the next line
+					else
+						search_pos.column -= 1;
+				}
+			}
+
+			if (search_pos.line == 0)
+				break; // Reached the first line and cannot go further back, so abort
+			else
+				search_pos.line -= 1;
+
+			if (match_offset != match_last && text[match_offset--] != '\n')
+				match_offset  = match_last; // Check for line feed in search text between lines
+
+			search_pos.column = _lines[search_pos.line].size(); // Continue at end of previous line
+		}
+	}
+	else
+	{
+		size_t match_offset = 0;
+
+		while (search_pos.line < _lines.size())
+		{
+			if (match_offset != 0 && text[match_offset++] != '\n')
+				match_offset  = 0; // Check for line feed in search text between lines
+
+			while (search_pos.column < _lines[search_pos.line].size())
+			{
+				if (_lines[search_pos.line][search_pos.column].c == text[match_offset])
+				{
+					if (match_offset == 0) // Keep track of beginning of the match
+						match_pos_beg = search_pos;
+
+					match_offset++;
+
+					// All characters matching means the text was found, so select it and return
+					if (match_offset == text.size())
+					{
+						_select_beg = match_pos_beg;
+						_select_end = text_pos(search_pos.line, search_pos.column + 1);
+						_cursor_pos = _select_end;
+						_scroll_to_cursor = true;
+						return true;
+					}
+				}
+				else
+				{
+					// A character mismatched, so start from the beginning again
+					match_offset = 0;
+				}
+
+				search_pos.column += 1;
+			}
+
+			search_pos.line += 1;
+			search_pos.column = 0;
+		}
+	}
+
+	return false; // No match found
 }
 
 void imgui_code_editor::colorize()

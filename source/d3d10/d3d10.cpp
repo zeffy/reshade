@@ -3,7 +3,7 @@
  * License: https://github.com/crosire/reshade#license
  */
 
-#include "log.hpp"
+#include "dll_log.hpp"
 #include "hook_manager.hpp"
 #include "d3d10_device.hpp"
 
@@ -83,7 +83,10 @@ HOOK_EXPORT HRESULT WINAPI D3D10CreateDeviceAndSwapChain1(IDXGIAdapter *pAdapter
 
 	// It is valid for the device out parameter to be NULL if the application wants to check feature level support, so just return early in that case
 	if (ppDevice == nullptr)
+	{
+		assert(ppSwapChain == nullptr);
 		return hr;
+	}
 
 	auto device = *ppDevice;
 	// Query for the DXGI device since we need to reference it in the hooked device
@@ -93,7 +96,7 @@ HOOK_EXPORT HRESULT WINAPI D3D10CreateDeviceAndSwapChain1(IDXGIAdapter *pAdapter
 
 	// Create device proxy unless this is a software device
 	D3D10Device *device_proxy = nullptr;
-	if (DriverType == D3D_DRIVER_TYPE_WARP || DriverType == D3D_DRIVER_TYPE_REFERENCE)
+	if (DriverType == D3D10_DRIVER_TYPE_WARP || DriverType == D3D10_DRIVER_TYPE_REFERENCE)
 	{
 		LOG(WARN) << "Skipping device because the driver type is 'D3D_DRIVER_TYPE_WARP' or 'D3D_DRIVER_TYPE_REFERENCE'.";
 	}

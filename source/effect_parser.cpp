@@ -3,9 +3,10 @@
  * License: https://github.com/crosire/reshade#license
  */
 
+#include "effect_lexer.hpp"
 #include "effect_parser.hpp"
 #include "effect_codegen.hpp"
-#include <assert.h>
+#include <cassert>
 #include <algorithm>
 #include <functional>
 
@@ -17,6 +18,13 @@ struct on_scope_exit
 	std::function<void()> leave;
 };
 
+reshadefx::parser::parser()
+{
+}
+reshadefx::parser::~parser()
+{
+}
+
 bool reshadefx::parser::parse(std::string input, codegen *backend)
 {
 	_lexer.reset(new lexer(std::move(input)));
@@ -27,12 +35,15 @@ bool reshadefx::parser::parse(std::string input, codegen *backend)
 
 	consume();
 
-	bool success = true;
-	while (!peek(tokenid::end_of_file))
-		if (!parse_top())
-			success = false;
+	bool parse_success = true;
 
-	return success;
+	while (!peek(tokenid::end_of_file))
+	{
+		if (!parse_top())
+			parse_success = false;
+	}
+
+	return parse_success;
 }
 
 // -- Error Handling -- //
@@ -141,7 +152,7 @@ bool reshadefx::parser::accept_type_class(type &type)
 			else if (_token.literal_as_int < 1 || _token.literal_as_int > 4)
 				return error(_token.location, 3052, "vector dimension must be between 1 and 4"), false;
 
-			type.rows = _token.literal_as_int;
+			type.rows = static_cast<unsigned int>(_token.literal_as_int);
 
 			if (!expect('>'))
 				return false;
@@ -166,14 +177,14 @@ bool reshadefx::parser::accept_type_class(type &type)
 			else if (_token.literal_as_int < 1 || _token.literal_as_int > 4)
 				return error(_token.location, 3053, "matrix dimensions must be between 1 and 4"), false;
 
-			type.rows = _token.literal_as_int;
+			type.rows = static_cast<unsigned int>(_token.literal_as_int);
 
 			if (!expect(',') || !expect(tokenid::int_literal))
 				return false;
 			else if (_token.literal_as_int < 1 || _token.literal_as_int > 4)
 				return error(_token.location, 3053, "matrix dimensions must be between 1 and 4"), false;
 
-			type.cols = _token.literal_as_int;
+			type.cols = static_cast<unsigned int>(_token.literal_as_int);
 
 			if (!expect('>'))
 				return false;
@@ -192,14 +203,14 @@ bool reshadefx::parser::accept_type_class(type &type)
 	case tokenid::bool3:
 	case tokenid::bool4:
 		type.base = type::t_bool;
-		type.rows = 1 + unsigned int(_token_next.id) - unsigned int(tokenid::bool_);
+		type.rows = 1 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::bool_);
 		type.cols = 1;
 		break;
 	case tokenid::bool2x2:
 	case tokenid::bool3x3:
 	case tokenid::bool4x4:
 		type.base = type::t_bool;
-		type.rows = 2 + unsigned int(_token_next.id) - unsigned int(tokenid::bool2x2);
+		type.rows = 2 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::bool2x2);
 		type.cols = type.rows;
 		break;
 	case tokenid::int_:
@@ -207,14 +218,14 @@ bool reshadefx::parser::accept_type_class(type &type)
 	case tokenid::int3:
 	case tokenid::int4:
 		type.base = type::t_int;
-		type.rows = 1 + unsigned int(_token_next.id) - unsigned int(tokenid::int_);
+		type.rows = 1 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::int_);
 		type.cols = 1;
 		break;
 	case tokenid::int2x2:
 	case tokenid::int3x3:
 	case tokenid::int4x4:
 		type.base = type::t_int;
-		type.rows = 2 + unsigned int(_token_next.id) - unsigned int(tokenid::int2x2);
+		type.rows = 2 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::int2x2);
 		type.cols = type.rows;
 		break;
 	case tokenid::uint_:
@@ -222,14 +233,14 @@ bool reshadefx::parser::accept_type_class(type &type)
 	case tokenid::uint3:
 	case tokenid::uint4:
 		type.base = type::t_uint;
-		type.rows = 1 + unsigned int(_token_next.id) - unsigned int(tokenid::uint_);
+		type.rows = 1 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::uint_);
 		type.cols = 1;
 		break;
 	case tokenid::uint2x2:
 	case tokenid::uint3x3:
 	case tokenid::uint4x4:
 		type.base = type::t_uint;
-		type.rows = 2 + unsigned int(_token_next.id) - unsigned int(tokenid::uint2x2);
+		type.rows = 2 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::uint2x2);
 		type.cols = type.rows;
 		break;
 	case tokenid::float_:
@@ -237,14 +248,14 @@ bool reshadefx::parser::accept_type_class(type &type)
 	case tokenid::float3:
 	case tokenid::float4:
 		type.base = type::t_float;
-		type.rows = 1 + unsigned int(_token_next.id) - unsigned int(tokenid::float_);
+		type.rows = 1 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::float_);
 		type.cols = 1;
 		break;
 	case tokenid::float2x2:
 	case tokenid::float3x3:
 	case tokenid::float4x4:
 		type.base = type::t_float;
-		type.rows = 2 + unsigned int(_token_next.id) - unsigned int(tokenid::float2x2);
+		type.rows = 2 + static_cast<unsigned int>(_token_next.id) - static_cast<unsigned int>(tokenid::float2x2);
 		type.cols = type.rows;
 		break;
 	case tokenid::string_:
@@ -762,7 +773,8 @@ bool reshadefx::parser::parse_expression_unary(expression &exp)
 			exp = std::move(arguments[0]); exp.add_cast_operation(type);
 		}
 	}
-	else // At this point only identifiers are left to check and resolve
+	// At this point only identifiers are left to check and resolve
+	else
 	{
 		// Starting an identifier with '::' restricts the symbol search to the global namespace level
 		const bool exclusive = accept(tokenid::colon_colon);
@@ -772,7 +784,8 @@ bool reshadefx::parser::parse_expression_unary(expression &exp)
 		if (exclusive ? expect(tokenid::identifier) : accept(tokenid::identifier))
 			identifier = std::move(_token.literal_as_string);
 		else
-			return false; // Warning: This may leave the expression path without issuing an error, so need to catch that at the call side!
+			// No token should come through here, since all possible prefix expressions should have been handled above, so this is an error in the syntax
+			return error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + '\''), false;
 
 		// Can concatenate multiple '::' to force symbol search for a specific namespace level
 		while (accept(tokenid::colon_colon))
@@ -836,6 +849,9 @@ bool reshadefx::parser::parse_expression_unary(expression &exp)
 			for (size_t i = 0; i < arguments.size(); ++i)
 			{
 				const auto &param_type = symbol.function->parameter_list[i].type;
+
+				if (param_type.has(type::q_out) && (arguments[i].type.has(type::q_const) || arguments[i].type.has(type::q_uniform) || !arguments[i].is_lvalue))
+					return error(arguments[i].location, 3025, "l-value specifies const object for an 'out' parameter"), false;
 
 				if (arguments[i].type.components() > param_type.components())
 					warning(arguments[i].location, 3206, "implicit truncation of vector type");
@@ -1006,18 +1022,22 @@ bool reshadefx::parser::parse_expression_unary(expression &exp)
 
 				for (size_t i = 0, j = 0; i < length; i += 3 + set, ++j)
 				{
-					if (subscript[i] != '_' || subscript[i + set + 1] < '0' + coefficient || subscript[i + set + 1] > '3' + coefficient || subscript[i + set + 2] < '0' + coefficient || subscript[i + set + 2] > '3' + coefficient)
+					if (subscript[i] != '_' ||
+						subscript[i + set + 1] < '0' + coefficient ||
+						subscript[i + set + 1] > '3' + coefficient ||
+						subscript[i + set + 2] < '0' + coefficient ||
+						subscript[i + set + 2] > '3' + coefficient)
 						return error(location, 3018, "invalid subscript '" + subscript + '\''), false;
 					if (set && subscript[i + 1] != 'm')
 						return error(location, 3018, "invalid subscript '" + subscript + "', mixed swizzle sets"), false;
 
-					const unsigned int row = subscript[i + set + 1] - '0' - coefficient;
-					const unsigned int col = subscript[i + set + 2] - '0' - coefficient;
+					const unsigned int row = static_cast<unsigned int>((subscript[i + set + 1] - '0') - coefficient);
+					const unsigned int col = static_cast<unsigned int>((subscript[i + set + 2] - '0') - coefficient);
 
 					if ((row >= exp.type.rows || col >= exp.type.cols) || j > 3)
 						return error(location, 3018, "invalid subscript '" + subscript + "', swizzle out of range"), false;
 
-					offsets[j] = static_cast<unsigned char>(row * 4 + col);
+					offsets[j] = static_cast<signed char>(row * 4 + col);
 
 					// The result is not modifiable if a swizzle appears multiple times
 					for (size_t k = 0; k < j; ++k)
@@ -1364,8 +1384,9 @@ bool reshadefx::parser::parse_expression_assignment(expression &lhs)
 		const tokenid op = _token.id;
 
 		// Parse right hand side of the assignment expression
+		// This may be another assignment expression to support chains like "a = b = c = 0;"
 		expression rhs;
-		if (!parse_expression_multary(rhs))
+		if (!parse_expression_assignment(rhs))
 			return false;
 
 		// Check if the assignment is valid
@@ -1406,7 +1427,7 @@ bool reshadefx::parser::parse_expression_assignment(expression &lhs)
 	return true;
 }
 
-bool reshadefx::parser::parse_annotations(std::unordered_map<std::string, std::pair<type, constant>> &annotations)
+bool reshadefx::parser::parse_annotations(std::vector<annotation> &annotations)
 {
 	// Check if annotations exist and return early if none do
 	if (!accept('<'))
@@ -1420,16 +1441,17 @@ bool reshadefx::parser::parse_annotations(std::unordered_map<std::string, std::p
 			warning(_token.location, 4717, "type prefixes for annotations are deprecated and ignored");
 
 		if (!expect(tokenid::identifier))
-			return false;
+			return consume_until('>'), false;
 
-		const auto name = std::move(_token.literal_as_string);
+		auto name = std::move(_token.literal_as_string);
 
-		if (expression expression; !expect('=') || !parse_expression_unary(expression) || !expect(';'))
-			return consume_until('>'), false; // Probably a syntax error, so abort parsing
+		if (expression expression; !expect('=') || !parse_expression_multary(expression) || !expect(';'))
+			return consume_until('>'), false;
 		else if (expression.is_constant)
-			annotations[name] = { expression.type, expression.constant };
+			annotations.push_back({ expression.type, std::move(name), std::move(expression.constant) });
 		else // Continue parsing annotations despite this not being a constant, since the syntax is still correct
-			error(expression.location, 3011, "value must be a literal expression"), parse_success = false;
+			parse_success = false,
+			error(expression.location, 3011, "value must be a literal expression");
 	}
 
 	return expect('>') && parse_success;
@@ -1559,7 +1581,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			_loop_break_target_stack.push_back(merge_block);
 			on_scope_exit _([this]() { _loop_break_target_stack.pop_back(); });
 
-			bool success = true;
+			bool parse_success = true;
 			codegen::id default_label = merge_block; // The default case jumps to the end of the switch statement if not overwritten
 			std::vector<codegen::id> case_literal_and_labels;
 			size_t last_case_label_index = 0;
@@ -1584,8 +1606,8 @@ bool reshadefx::parser::parse_statement(bool scoped)
 						{
 							if (case_literal_and_labels[i] == case_label.constant.as_uint[0])
 							{
+								parse_success = false;
 								error(case_label.location, 3532, "duplicate case " + std::to_string(case_label.constant.as_uint[0]));
-								success = false;
 								break;
 							}
 						}
@@ -1598,8 +1620,8 @@ bool reshadefx::parser::parse_statement(bool scoped)
 						// Check if the default label was already changed by a previous 'default' statement
 						if (default_label != merge_block)
 						{
+							parse_success = false;
 							error(_token.location, 3532, "duplicate default in switch statement");
-							success = false;
 						}
 
 						default_label = 0; // This is set to the actual block below
@@ -1620,8 +1642,8 @@ bool reshadefx::parser::parse_statement(bool scoped)
 				{
 					if (_codegen->is_in_block()) // Disallow fall-through for now
 					{
+						parse_success = false;
 						error(_token_next.location, 3533, "non-empty case statements must have break or return");
-						success = false;
 					}
 
 					const codegen::id next_block = end_of_switch ? merge_block : _codegen->create_block();
@@ -1650,7 +1672,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			// Emit structured control flow for a switch statement and connect all basic blocks
 			_codegen->emit_switch(location, selector_value, selector_block, default_label, case_literal_and_labels, selection_control);
 
-			return expect('}') && success;
+			return expect('}') && parse_success;
 		}
 		#pragma endregion
 
@@ -1932,7 +1954,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			{
 				expression expression;
 				if (!parse_expression(expression))
-					return error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + "', expected expression"), consume_until(';'), false;
+					return consume_until(';'), false;
 
 				// Cannot return to void
 				if (ret_type.is_void())
@@ -2004,9 +2026,6 @@ bool reshadefx::parser::parse_statement(bool scoped)
 	if (expression expression; parse_expression(expression))
 		return expect(';'); // A statement has to be terminated with a semicolon
 
-	// No token should come through here, since all statements and expressions should have been handled above, so this is an error in the syntax
-	error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + '\'');
-
 	// Gracefully consume any remaining characters until the statement would usually end, so that parsing may continue despite the error
 	consume_until(';');
 
@@ -2074,15 +2093,18 @@ bool reshadefx::parser::parse_top()
 
 		enter_namespace(name);
 
-		bool success = true;
+		bool parse_success = true;
+
 		// Recursively parse top level statements until the namespace is closed again
 		while (!peek('}')) // Empty namespaces are valid
+		{
 			if (!parse_top())
-				success = false; // Continue parsing even after encountering an error
+				parse_success = false; // Continue parsing even after encountering an error
+		}
 
 		leave_namespace();
 
-		return expect('}') && success;
+		return expect('}') && parse_success;
 	}
 	else if (accept(tokenid::struct_)) // Structure keyword found, parse the structure definition
 	{
@@ -2239,49 +2261,86 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 	info.return_type = type;
 	_current_return_type = info.return_type;
 
+	bool parse_success = true;
+	bool expect_parenthesis = true;
+
 	// Enter function scope
 	enter_scope(); on_scope_exit _([this]() { leave_scope(); _codegen->leave_function(); });
 
 	while (!peek(')'))
 	{
 		if (!info.parameter_list.empty() && !expect(','))
-			return false;
+		{
+			parse_success = false;
+			expect_parenthesis = false;
+			consume_until(')');
+			break;
+		}
 
 		struct_member_info param;
 
 		if (!parse_type(param.type))
-			return error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + "', expected parameter type"), false;
+		{
+			error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + "', expected parameter type");
+			parse_success = false;
+			expect_parenthesis = false;
+			consume_until(')');
+			break;
+		}
 
 		if (!expect(tokenid::identifier))
-			return false;
+		{
+			parse_success = false;
+			expect_parenthesis = false;
+			consume_until(')');
+			break;
+		}
 
 		param.name = std::move(_token.literal_as_string);
 		param.location = std::move(_token.location);
 
 		if (param.type.is_void())
-			return error(param.location, 3038, '\'' + param.name + "': function parameters cannot be void"), false;
+			parse_success = false,
+			error(param.location, 3038, '\'' + param.name + "': function parameters cannot be void");
 		if (param.type.has(type::q_extern))
-			return error(param.location, 3006, '\'' + param.name + "': function parameters cannot be declared 'extern'"), false;
+			parse_success = false,
+			error(param.location, 3006, '\'' + param.name + "': function parameters cannot be declared 'extern'");
 		if (param.type.has(type::q_static))
-			return error(param.location, 3007, '\'' + param.name + "': function parameters cannot be declared 'static'"), false;
+			parse_success = false,
+			error(param.location, 3007, '\'' + param.name + "': function parameters cannot be declared 'static'");
 		if (param.type.has(type::q_uniform))
-			return error(param.location, 3047, '\'' + param.name + "': function parameters cannot be declared 'uniform', consider placing in global scope instead"), false;
+			parse_success = false,
+			error(param.location, 3047, '\'' + param.name + "': function parameters cannot be declared 'uniform', consider placing in global scope instead");
 
 		if (param.type.has(type::q_out) && param.type.has(type::q_const))
-			return error(param.location, 3046, '\'' + param.name + "': output parameters cannot be declared 'const'"), false;
+			parse_success = false,
+			error(param.location, 3046, '\'' + param.name + "': output parameters cannot be declared 'const'");
 		else if (!param.type.has(type::q_out))
 			param.type.qualifiers |= type::q_in; // Function parameters are implicitly 'in' if not explicitly defined as 'out'
 
 		if (!parse_array_size(param.type))
-			return false;
+		{
+			parse_success = false;
+			expect_parenthesis = false;
+			consume_until(')');
+			break;
+		}
 		else if (param.type.array_length < 0)
-			return error(param.location, 3072, '\'' + param.name + "': array dimensions of function parameters must be explicit"), false;
+		{
+			parse_success = false;
+			error(param.location, 3072, '\'' + param.name + "': array dimensions of function parameters must be explicit");
+		}
 
 		// Handle parameter type semantic
 		if (accept(':'))
 		{
 			if (!expect(tokenid::identifier))
-				return false;
+			{
+				parse_success = false;
+				expect_parenthesis = false;
+				consume_until(')');
+				break;
+			}
 
 			param.semantic = std::move(_token.literal_as_string);
 			// Make semantic upper case to simplify comparison later on
@@ -2291,7 +2350,7 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 		info.parameter_list.push_back(std::move(param));
 	}
 
-	if (!expect(')'))
+	if (expect_parenthesis && !expect(')'))
 		return false;
 
 	// Handle return type semantic
@@ -2328,7 +2387,8 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 	// A function has to start with a new block
 	_codegen->enter_block(_codegen->create_block());
 
-	const bool parse_success = parse_statement_block(false);
+	if (!parse_statement_block(false))
+		parse_success = false;
 
 	// Add implicit return statement to the end of functions
 	if (_codegen->is_in_block())
@@ -2388,6 +2448,7 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 	if (!parse_array_size(type))
 		return false;
 
+	bool parse_success = true;
 	expression initializer;
 	texture_info texture_info;
 	sampler_info sampler_info;
@@ -2409,13 +2470,13 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 	{
 		// Global variables can have optional annotations
 		if (global && !parse_annotations(texture_info.annotations))
-			return false;
+			parse_success = false;
 
 		// Variables without a semantic may have an optional initializer
 		if (accept('='))
 		{
 			if (!parse_expression_assignment(initializer))
-				return error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + "', expected expression"), false;
+				return false;
 
 			if (global && !initializer.is_constant) // TODO: This could be resolved by initializing these at the beginning of the entry point
 				return error(initializer.location, 3011, '\'' + name + "': initial value must be a literal expression"), false;
@@ -2501,7 +2562,7 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 
 				// Parse right hand side as normal expression if no special enumeration name was matched already
 				if (!expression.is_constant && !parse_expression_multary(expression))
-					return error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + "', expected expression"), consume_until('}'), false;
+					return consume_until('}'), false;
 
 				if (property_name == "Texture")
 				{
@@ -2570,7 +2631,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 
 	symbol symbol;
 
-	if (type.is_numeric() && type.has(type::q_const) && initializer.is_constant) // Variables with a constant initializer and constant type are named constants
+	// Variables with a constant initializer and constant type are named constants
+	if (type.is_numeric() && type.has(type::q_const) && initializer.is_constant)
 	{
 		// Named constants are special symbols
 		symbol = { symbol_type::constant, 0, type, initializer.constant };
@@ -2586,7 +2648,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		symbol = { symbol_type::variable, 0, type };
 		symbol.id = _codegen->define_texture(location, texture_info);
 	}
-	else if (type.is_sampler()) // Samplers are actually combined image samplers
+	// Samplers are actually combined image samplers
+	else if (type.is_sampler())
 	{
 		assert(global);
 
@@ -2602,7 +2665,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		symbol = { symbol_type::variable, 0, type };
 		symbol.id = _codegen->define_sampler(location, sampler_info);
 	}
-	else if (type.has(type::q_uniform)) // Uniform variables are put into a global uniform buffer structure
+	// Uniform variables are put into a global uniform buffer structure
+	else if (type.has(type::q_uniform))
 	{
 		assert(global);
 
@@ -2618,42 +2682,22 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		symbol = { symbol_type::variable, 0, type };
 		symbol.id = _codegen->define_uniform(location, uniform_info);
 	}
-	else // All other variables are separate entities
+	// All other variables are separate entities
+	else
 	{
-		symbol = { symbol_type::variable, 0, type };
-
 		// Update global variable names to contain the namespace scope to avoid name clashes
 		std::string unique_name = global ? 'V' + current_scope().name + name : name;
 		std::replace(unique_name.begin(), unique_name.end(), ':', '_');
 
-		// The initializer expression for variables must be a constant
-		// Also, only use the variable initializer on global variables, since local variables for e.g. "for" statements need to be assigned in their respective scope and not their declaration
-		if (global && initializer.is_constant)
-		{
-			symbol.id = _codegen->define_variable(location, type, std::move(unique_name), global, _codegen->emit_constant(initializer.type, initializer.constant));
-		}
-		else // Non-constant initializers are explicitly stored in the variable at the definition location instead
-		{
-			const auto initializer_value = _codegen->emit_load(initializer);
-
-			symbol.id = _codegen->define_variable(location, type, std::move(unique_name), global);
-
-			if (initializer_value != 0)
-			{
-				assert(!global); // Global variables cannot have a dynamic initializer
-
-				expression variable; variable.reset_to_lvalue(location, symbol.id, type);
-
-				_codegen->emit_store(variable, initializer_value);
-			}
-		}
+		symbol = { symbol_type::variable, 0, type };
+		symbol.id = _codegen->define_variable(location, type, std::move(unique_name), global, _codegen->emit_load(initializer));
 	}
 
 	// Insert the symbol into the symbol table
 	if (!insert_symbol(name, symbol, global))
 		return error(location, 3003, "redefinition of '" + name + '\''), false;
 
-	return true;
+	return parse_success;
 }
 
 bool reshadefx::parser::parse_technique()
@@ -2664,20 +2708,25 @@ bool reshadefx::parser::parse_technique()
 	technique_info info;
 	info.name = std::move(_token.literal_as_string);
 
-	if (!parse_annotations(info.annotations) || !expect('{'))
+	bool parse_success = parse_annotations(info.annotations);
+
+	if (!expect('{'))
 		return false;
 
 	while (!peek('}'))
 	{
 		if (pass_info pass; parse_technique_pass(pass))
 			info.passes.push_back(std::move(pass));
-		else if (!peek(tokenid::pass)) // If there is another pass definition following, try to parse that despite the error
-			return consume_until('}'), false;
+		else {
+			parse_success = false;
+			if (!peek(tokenid::pass) && !peek('}')) // If there is another pass definition following, try to parse that despite the error
+				return consume_until('}'), false;
+		}
 	}
 
 	_codegen->define_technique(info);
 
-	return expect('}');
+	return expect('}') && parse_success;
 }
 
 bool reshadefx::parser::parse_technique_pass(pass_info &info)
@@ -2685,8 +2734,13 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 	if (!expect(tokenid::pass))
 		return false;
 
+	const auto pass_location = std::move(_token.location);
+
 	// Passes can have an optional name, so consume and ignore that if it exists
 	accept(tokenid::identifier);
+
+	bool parse_success = true;
+	function_info vs_info, ps_info;
 
 	if (!expect('{'))
 		return false;
@@ -2743,46 +2797,62 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 				if (is_shader_state)
 				{
 					if (!symbol.id)
-						return error(location, 3501, "undeclared identifier '" + identifier + "', expected function name"), consume_until('}'), false;
+						parse_success = false,
+						error(location, 3501, "undeclared identifier '" + identifier + "', expected function name");
 					else if (!symbol.type.is_function())
-						return error(location, 3020, "type mismatch, expected function name"), consume_until('}'), false;
+						parse_success = false,
+						error(location, 3020, "type mismatch, expected function name");
+					else {
+						const bool is_vs = state[0] == 'V';
+						const bool is_ps = state[0] == 'P';
 
-					const bool is_vs = state[0] == 'V';
-					const bool is_ps = state[0] == 'P';
+						// Look up the matching function info for this function definition
+						function_info &function_info = _codegen->find_function(symbol.id);
 
-					// Look up the matching function info for this function definition
-					function_info &function_info = _codegen->find_function(symbol.id);
+						// We potentially need to generate a special entry point function which translates between function parameters and input/output variables
+						_codegen->define_entry_point(function_info, is_ps);
 
-					// We potentially need to generate a special entry point function which translates between function parameters and input/output variables
-					_codegen->define_entry_point(function_info, is_ps);
-
-					if (is_vs)
-						info.vs_entry_point = function_info.unique_name;
-					if (is_ps)
-						info.ps_entry_point = function_info.unique_name;
+						if (is_vs)
+						{
+							vs_info = function_info;
+							info.vs_entry_point = function_info.unique_name;
+						}
+						if (is_ps)
+						{
+							ps_info = function_info;
+							info.ps_entry_point = function_info.unique_name;
+						}
+					}
 				}
 				else
 				{
 					assert(is_texture_state);
 
 					if (!symbol.id)
-						return error(location, 3004, "undeclared identifier '" + identifier + "', expected texture name"), consume_until('}'), false;
+						parse_success = false,
+						error(location, 3004, "undeclared identifier '" + identifier + "', expected texture name");
 					else if (!symbol.type.is_texture())
-						return error(location, 3020, "type mismatch, expected texture name"), consume_until('}'), false;
+						parse_success = false,
+						error(location, 3020, "type mismatch, expected texture name");
+					else {
+						const texture_info &target_info = _codegen->find_texture(symbol.id);
 
-					const texture_info &target_info = _codegen->find_texture(symbol.id);
+						// Verify that all render targets in this pass have the same dimensions
+						if (info.viewport_width != 0 && info.viewport_height != 0 && (target_info.width != info.viewport_width || target_info.height != info.viewport_height))
+							parse_success = false,
+							error(location, 4545, "cannot use multiple render targets with different texture dimensions (is " + std::to_string(target_info.width) + 'x' + std::to_string(target_info.height) + ", but expected " + std::to_string(info.viewport_width) + 'x' + std::to_string(info.viewport_height) + ')');
 
-					// Verify that all render targets in this pass have the same dimensions
-					if (info.viewport_width != 0 && info.viewport_height != 0 && (target_info.width != info.viewport_width || target_info.height != info.viewport_height))
-						return error(location, 4545, "cannot use multiple render targets with different texture dimensions (is " + std::to_string(target_info.width) + 'x' + std::to_string(target_info.height) + ", but expected " + std::to_string(info.viewport_width) + 'x' + std::to_string(info.viewport_height) + ')'), false;
+						info.viewport_width = target_info.width;
+						info.viewport_height = target_info.height;
 
-					info.viewport_width = target_info.width;
-					info.viewport_height = target_info.height;
-
-					const size_t target_index = state.size() > 12 ? (state[12] - '0') : 0;
-
-					info.render_target_names[target_index] = target_info.unique_name;
+						const auto target_index = state.size() > 12 ? (state[12] - '0') : 0;
+						info.render_target_names[target_index] = target_info.unique_name;
+					}
 				}
+			}
+			else
+			{
+				parse_success = false;
 			}
 		}
 		else // Handle the rest of the pass states
@@ -2816,9 +2886,10 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 
 			// Parse right hand side as normal expression if no special enumeration name was matched already
 			if (!expression.is_constant && !parse_expression_multary(expression))
-				return error(_token_next.location, 3000, "syntax error: unexpected '" + token::id_to_name(_token_next.id) + "', expected expression"), consume_until('}'), false;
+				return consume_until('}'), false;
 			else if (!expression.is_constant || !expression.type.is_scalar())
-				return error(expression.location, 3011, "pass state value must be a literal scalar expression"), consume_until('}'), false;
+				parse_success = false,
+				error(expression.location, 3011, "pass state value must be a literal scalar expression");
 
 			// All states below expect the value to be of an unsigned integer type
 			expression.add_cast_operation({ type::t_uint, 1, 1 });
@@ -2863,12 +2934,36 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 			else if (state == "VertexCount")
 				info.num_vertices = value;
 			else
-				return error(location, 3004, "unrecognized pass state '" + state + '\''), consume_until('}'), false;
+				parse_success = false,
+				error(location, 3004, "unrecognized pass state '" + state + '\'');
 		}
 
 		if (!expect(';'))
 			return consume_until('}'), false;
 	}
 
-	return expect('}');
+	if (parse_success)
+	{
+		// Verify pass states
+		if (info.vs_entry_point.empty())
+			parse_success = false,
+			error(pass_location, 3012, "pass is missing 'VertexShader' property");
+		if (info.ps_entry_point.empty())
+			parse_success = false,
+			error(pass_location, 3012, "pass is missing 'PixelShader' property");
+
+		// Verify that shader signatures between VS and PS match
+		std::unordered_map<std::string, type> vs_semantic_mapping;
+		if (!vs_info.return_semantic.empty())
+			vs_semantic_mapping[vs_info.return_semantic] = vs_info.return_type;
+		for (auto &param : vs_info.parameter_list)
+			if (!param.semantic.empty() && param.type.has(type::qualifier::q_out))
+				vs_semantic_mapping[param.semantic] = param.type;
+		for (auto &param : ps_info.parameter_list)
+			if (!param.semantic.empty() && param.type.has(type::qualifier::q_in))
+				if (const auto it = vs_semantic_mapping.find(param.semantic); it == vs_semantic_mapping.end() || it->second != param.type)
+					warning(pass_location, 4576, '\'' + param.name + "': pixel shader signature does not match vertex shader one");
+	}
+
+	return expect('}') && parse_success;
 }

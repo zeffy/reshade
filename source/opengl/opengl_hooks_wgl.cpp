@@ -3,13 +3,13 @@
  * License: https://github.com/crosire/reshade#license
  */
 
-#include "log.hpp"
+#include "dll_log.hpp"
 #include "hook_manager.hpp"
 #include "runtime_gl.hpp"
 #include "opengl_hooks.hpp"
-#include <assert.h>
 #include <mutex>
 #include <memory>
+#include <cassert>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -492,14 +492,18 @@ HOOK_EXPORT BOOL  WINAPI wglDeleteContext(HGLRC hglrc)
 #endif
 
 		// Choose a random device context to make current with (and hope that is still alive)
-		const HDC hdc = *it->second->_hdcs.begin();
+		const HDC hdc = *it->second->_hdcs.begin(), prev_hdc = wglGetCurrentDC();
+		const HGLRC prev_hglrc = wglGetCurrentContext();
 
 		// Set the render context current so its resources can be cleaned up
-		if (reshade::hooks::call(wglMakeCurrent)(hdc, hglrc))
+		if (hglrc == prev_hglrc || reshade::hooks::call(wglMakeCurrent)(hdc, hglrc))
 		{
 			it->second->on_reset();
 
 			delete it->second;
+
+			if (hglrc != prev_hglrc) // Reset to previous context if it was a different one
+				reshade::hooks::call(wglMakeCurrent)(prev_hdc, prev_hglrc);
 		}
 		else
 		{
@@ -584,16 +588,18 @@ HOOK_EXPORT BOOL  WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
 
 	const std::lock_guard<std::mutex> lock(s_mutex);
 
-	if (s_shared_contexts.at(hglrc) != nullptr)
+	if (const auto it = s_shared_contexts.find(hglrc);
+		it != s_shared_contexts.end() && it->second != nullptr)
 	{
-		hglrc = s_shared_contexts.at(hglrc);
+		hglrc = it->second;
 
 #if RESHADE_VERBOSE_LOG
 		LOG(DEBUG) << "> Using shared OpenGL context " << hglrc << '.';
 #endif
 	}
 
-	if (const auto it = s_opengl_runtimes.find(hglrc); it != s_opengl_runtimes.end())
+	if (const auto it = s_opengl_runtimes.find(hglrc);
+		it != s_opengl_runtimes.end())
 	{
 		if (it->second != g_current_runtime)
 		{
@@ -1001,6 +1007,7 @@ HOOK_EXPORT PROC  WINAPI wglGetProcAddress(LPCSTR lpszProc)
 	else if (static bool s_hooks_not_installed = true; s_hooks_not_installed)
 	{
 		// Install all OpenGL hooks in a single batch job
+		reshade::hooks::install("glDeleteRenderbuffers", reinterpret_cast<reshade::hook::address>(trampoline("glDeleteRenderbuffers")), reinterpret_cast<reshade::hook::address>(glDeleteRenderbuffers), true);
 		reshade::hooks::install("glDrawArraysIndirect", reinterpret_cast<reshade::hook::address>(trampoline("glDrawArraysIndirect")), reinterpret_cast<reshade::hook::address>(glDrawArraysIndirect), true);
 		reshade::hooks::install("glDrawArraysInstanced", reinterpret_cast<reshade::hook::address>(trampoline("glDrawArraysInstanced")), reinterpret_cast<reshade::hook::address>(glDrawArraysInstanced), true);
 		reshade::hooks::install("glDrawArraysInstancedARB", reinterpret_cast<reshade::hook::address>(trampoline("glDrawArraysInstancedARB")), reinterpret_cast<reshade::hook::address>(glDrawArraysInstancedARB), true);

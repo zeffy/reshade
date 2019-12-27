@@ -3,9 +3,10 @@
  * License: https://github.com/crosire/reshade#license
  */
 
-#include "log.hpp"
+#include "dll_log.hpp"
 #include "hook_manager.hpp"
 #include "version.h"
+#include <Psapi.h>
 #include <Windows.h>
 
 HMODULE g_module_handle = nullptr;
@@ -18,16 +19,23 @@ extern std::filesystem::path get_system_path()
 	static std::filesystem::path system_path;
 	if (!system_path.empty())
 		return system_path; // Return the cached system path
-	TCHAR buf[MAX_PATH] = {};
-	GetSystemDirectory(buf, ARRAYSIZE(buf));
-	return system_path = buf;
+
+	WCHAR buf[4096];
+	if (GetEnvironmentVariableW(L"RESHADE_MODULE_PATH_OVERRIDE", buf, ARRAYSIZE(buf)) == 0) // Failure or empty
+		GetSystemDirectoryW(buf, ARRAYSIZE(buf)); // First try environment variable, use system directory if it does not exist
+
+	if (system_path = buf; system_path.has_stem())
+		system_path += L'\\'; // Always convert to directory path and not a file
+	if (system_path.is_relative())
+		system_path = g_target_executable_path.parent_path() / system_path;
+
+	return system_path = system_path.lexically_normal();
 }
 
 static inline std::filesystem::path get_module_path(HMODULE module)
 {
-	TCHAR buf[MAX_PATH] = {};
-	GetModuleFileName(module, buf, ARRAYSIZE(buf));
-	return buf;
+	WCHAR buf[4096];
+	return GetModuleFileNameW(module, buf, ARRAYSIZE(buf)) ? buf : L"";
 }
 
 #ifdef RESHADE_TEST_APPLICATION
@@ -59,7 +67,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 	// Register window class
 	WNDCLASS wc = { sizeof(wc) };
 	wc.hInstance = hInstance;
-	wc.style = CS_HREDRAW | CS_VREDRAW;
+	wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
 	wc.lpszClassName = TEXT("Test");
 	wc.lpfnWndProc =
 		[](HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
@@ -100,8 +108,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
 	if (strstr(lpCmdLine, "-d3d9"))
 	{
-		hooks::register_module("d3d9.dll");
 		const auto d3d9_module = LoadLibrary(TEXT("d3d9.dll"));
+		assert(d3d9_module != nullptr);
+		hooks::register_module("d3d9.dll");
 
 		D3DPRESENT_PARAMETERS pp = {};
 		pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
@@ -146,9 +155,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 	#pragma region D3D11 Implementation
 	if (strstr(lpCmdLine, "-d3d11"))
 	{
+		const auto dxgi_module = LoadLibrary(TEXT("dxgi.dll"));
+		const auto d3d11_module = LoadLibrary(TEXT("d3d11.dll"));
+		assert(dxgi_module != nullptr);
+		assert(d3d11_module != nullptr);
 		hooks::register_module("dxgi.dll");
 		hooks::register_module("d3d11.dll");
-		const auto d3d11_module = LoadLibrary(TEXT("d3d11.dll"));
 
 		// Initialize Direct3D 11
 		com_ptr<ID3D11Device> device;
@@ -199,6 +211,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
 		reshade::hooks::uninstall();
 
+		FreeLibrary(dxgi_module);
 		FreeLibrary(d3d11_module);
 
 		return static_cast<int>(msg.wParam);
@@ -208,9 +221,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 	#pragma region D3D12 Implementation
 	if (strstr(lpCmdLine, "-d3d12"))
 	{
+		const auto dxgi_module = LoadLibrary(TEXT("dxgi.dll"));
+		const auto d3d12_module = LoadLibrary(TEXT("d3d12.dll"));
+		assert(dxgi_module != nullptr);
+		assert(d3d12_module != nullptr);
 		hooks::register_module("dxgi.dll");
 		hooks::register_module("d3d12.dll");
-		const auto d3d12_module = LoadLibrary(TEXT("d3d12.dll"));
 
 		// Enable D3D debug layer if it is available
 		{   com_ptr<ID3D12Debug> debug_iface;
@@ -268,9 +284,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 		}
 
 		const UINT rtv_handle_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-		D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-
 		HCHECK(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_alloc)));
+
+	resize_buffers:
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
 
 		for (UINT i = 0; i < num_buffers; ++i, rtv_handle.ptr += rtv_handle_size)
 		{
@@ -323,6 +340,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 				PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
 				DispatchMessage(&msg);
 
+			if (s_resize_w != 0)
+			{
+				// Clean up current resources referencing the back buffer
+				for (auto &ptr : cmd_lists)
+					ptr.reset();
+				for (auto &ptr : backbuffers)
+					ptr.reset();
+
+				if (!is_d3d12on7)
+					HCHECK(swapchain->ResizeBuffers(num_buffers, s_resize_w, s_resize_h, DXGI_FORMAT_UNKNOWN, 0));
+
+				s_resize_w = s_resize_h = 0;
+
+				goto resize_buffers; // Re-create command lists
+			}
+
 			const UINT swap_index = is_d3d12on7 ? 0 : swapchain->GetCurrentBackBufferIndex();
 
 			ID3D12CommandList *const cmd_list = cmd_lists[swap_index].get();
@@ -349,6 +382,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
 		reshade::hooks::uninstall();
 
+		FreeLibrary(dxgi_module);
 		FreeLibrary(d3d12_module);
 
 		return static_cast<int>(msg.wParam);
@@ -358,8 +392,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 	#pragma region OpenGL Implementation
 	if (strstr(lpCmdLine, "-opengl"))
 	{
-		hooks::register_module("opengl32.dll");
 		const auto opengl_module = LoadLibrary(TEXT("opengl32.dll"));
+		assert(opengl_module != nullptr);
+		hooks::register_module("opengl32.dll");
 
 		// Initialize OpenGL
 		const HDC hdc = GetDC(window_handle);
@@ -370,14 +405,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 		pfd.iPixelType = PFD_TYPE_RGBA;
 		pfd.cColorBits = 32;
 
-		const int pf = ChoosePixelFormat(hdc, &pfd);
-		SetPixelFormat(hdc, pf, &pfd);
+		SetPixelFormat(hdc, ChoosePixelFormat(hdc, &pfd), &pfd);
 
-		const HGLRC hglrc = wglCreateContext(hdc);
-		if (hglrc == nullptr)
+		const HGLRC hglrc1 = wglCreateContext(hdc);
+		if (hglrc1 == nullptr)
 			return 0;
 
-		wglMakeCurrent(hdc, hglrc);
+		wglMakeCurrent(hdc, hglrc1);
+
+		// Create an OpenGL 4.3 context
+		const int attribs[] = {
+			0x2091 /*WGL_CONTEXT_MAJOR_VERSION_ARB*/, 4,
+			0x2092 /*WGL_CONTEXT_MINOR_VERSION_ARB*/, 3,
+			0 // Terminate list
+		};
+
+		const HGLRC hglrc2 = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int *)>(
+			wglGetProcAddress("wglCreateContextAttribsARB"))(hdc, nullptr, attribs);
+		if (hglrc2 == nullptr)
+			return 0;
+
+		wglMakeCurrent(nullptr, nullptr);
+		wglDeleteContext(hglrc1);
+		wglMakeCurrent(hdc, hglrc2);
 
 		while (msg.message != WM_QUIT)
 		{
@@ -395,11 +445,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 			glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT);
 
-			SwapBuffers(hdc);
+			wglSwapLayerBuffers(hdc, WGL_SWAP_MAIN_PLANE);
 		}
 
 		wglMakeCurrent(nullptr, nullptr);
-		wglDeleteContext(hglrc);
+		wglDeleteContext(hglrc2);
 
 		reshade::hooks::uninstall();
 
@@ -417,8 +467,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
 	if (strstr(lpCmdLine, "-vulkan"))
 	{
-		hooks::register_module("vulkan-1.dll");
 		const auto vulkan_module = LoadLibrary(TEXT("vulkan-1.dll"));
+		assert(vulkan_module != nullptr);
+		hooks::register_module("vulkan-1.dll");
 
 		VkDevice device = VK_NULL_HANDLE;
 		VkInstance instance = VK_NULL_HANDLE;
@@ -670,6 +721,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
 #else
 
+// Export special symbol to identify modules as ReShade instances
+extern "C" __declspec(dllexport) const char *ReShadeVersion = VERSION_STRING_PRODUCT;
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {
 	using namespace reshade;
@@ -684,10 +738,23 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 		log::open(std::filesystem::path(g_reshade_dll_path).replace_extension(".log"));
 
 #ifdef WIN64
-		LOG(INFO) << "Initializing crosire's ReShade version '" VERSION_STRING_FILE "' (64-bit) built on '" VERSION_DATE " " VERSION_TIME "' loaded from " << g_reshade_dll_path << " to " << g_target_executable_path << " ...";
+		LOG(INFO) << "Initializing crosire's ReShade version '" VERSION_STRING_FILE "' (64-bit) built on '" VERSION_DATE " " VERSION_TIME "' loaded from " << g_reshade_dll_path << " into " << g_target_executable_path << " ...";
 #else
-		LOG(INFO) << "Initializing crosire's ReShade version '" VERSION_STRING_FILE "' (32-bit) built on '" VERSION_DATE " " VERSION_TIME "' loaded from " << g_reshade_dll_path << " to " << g_target_executable_path << " ...";
+		LOG(INFO) << "Initializing crosire's ReShade version '" VERSION_STRING_FILE "' (32-bit) built on '" VERSION_DATE " " VERSION_TIME "' loaded from " << g_reshade_dll_path << " into " << g_target_executable_path << " ...";
 #endif
+
+		// Check if another ReShade instance was already loaded into the process
+		if (HMODULE modules[1024]; K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &fdwReason)) // Use kernel32 variant which is available in DllMain
+		{
+			for (DWORD i = 0; i < std::min<DWORD>(fdwReason / sizeof(HMODULE), ARRAYSIZE(modules)); ++i)
+			{
+				if (modules[i] != hModule && GetProcAddress(modules[i], "ReShadeVersion") != nullptr)
+				{
+					LOG(WARN) << "Another ReShade instance was already loaded from " << get_module_path(modules[i]) << "! Aborting initialization ...";
+					return FALSE; // Make the "LoadLibrary" call that loaded this instance fail
+				}
+			}
+		}
 
 		hooks::register_module("user32.dll");
 
@@ -707,7 +774,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 
 		hooks::uninstall();
 
-		LOG(INFO) << "Exited.";
+		LOG(INFO) << "Finished exiting.";
 		break;
 	}
 

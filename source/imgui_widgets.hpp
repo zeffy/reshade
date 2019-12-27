@@ -6,6 +6,7 @@
 #pragma once
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <filesystem>
 
 bool imgui_key_input(const char *name, unsigned int key_data[4], const reshade::input &input);
@@ -18,9 +19,16 @@ bool imgui_directory_input_box(const char *name, std::filesystem::path &path, st
 
 bool imgui_path_list(const char *label, std::vector<std::filesystem::path> &paths, std::filesystem::path &dialog_path, const std::filesystem::path &default_path = std::filesystem::path());
 
+bool imgui_radio_list(const char *label, const std::string_view ui_items, int &v);
+
 bool imgui_popup_button(const char *label, float width = 0.0f, ImGuiWindowFlags flags = 0);
 
+bool imgui_toggle_button(const char *label, bool &toggle);
+
 bool imgui_list_with_buttons(const char *label, const std::string_view ui_items, int &v);
+
+bool imgui_combo_with_buttons(const char *label, bool &v);
+bool imgui_combo_with_buttons(const char *label, const std::string_view ui_items, int &v);
 
 bool imgui_drag_with_buttons(const char *label, ImGuiDataType data_type, void *v, int components, const void *v_speed, const void *v_min, const void *v_max, const char *format = nullptr);
 
@@ -28,4 +36,4 @@ bool imgui_slider_with_buttons(const char *label, ImGuiDataType data_type, void 
 
 bool imgui_slider_for_alpha(const char *label, float *v);
 
-void imgui_image_with_checkerboard_background(ImTextureID user_texture_id, const ImVec2 &size);
+void imgui_image_with_checkerboard_background(ImTextureID user_texture_id, const ImVec2 &size, ImU32 tint_col = 0xFFFFFFFF);

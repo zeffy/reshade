@@ -3,14 +3,14 @@
  * License: https://github.com/crosire/reshade#license
  */
 
-#include "log.hpp"
+#include "dll_log.hpp"
 #include "input.hpp"
 #include "hook_manager.hpp"
-#include <assert.h>
-#include <Windows.h>
 #include <mutex>
+#include <cassert>
 #include <algorithm>
 #include <unordered_map>
+#include <Windows.h>
 
 static std::mutex s_windows_mutex;
 static std::unordered_map<HWND, unsigned int> s_raw_input_windows;
@@ -22,8 +22,26 @@ reshade::input::input(window_handle window)
 	assert(window != nullptr);
 }
 
+#if RESHADE_UWP
+static bool is_uwp_app()
+{
+	const auto GetCurrentPackageFullName = reinterpret_cast<LONG(WINAPI*)(UINT32*, PWSTR)>(
+		GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetCurrentPackageFullName"));
+	if (GetCurrentPackageFullName == nullptr)
+		return false;
+	// This will return APPMODEL_ERROR_NO_PACKAGE if not a packaged UWP app
+	UINT32 length = 0;
+	return GetCurrentPackageFullName(&length, nullptr) == ERROR_INSUFFICIENT_BUFFER;
+}
+#endif
+
 void reshade::input::register_window_with_raw_input(window_handle window, bool no_legacy_keyboard, bool no_legacy_mouse)
 {
+#if RESHADE_UWP
+	if (is_uwp_app()) // UWP apps never use legacy input messages
+		no_legacy_keyboard = no_legacy_mouse = true;
+#endif
+
 	const std::lock_guard<std::mutex> lock(s_windows_mutex);
 
 	const auto flags = (no_legacy_keyboard ? 0x1u : 0u) | (no_legacy_mouse ? 0x2u : 0u);
@@ -99,19 +117,14 @@ bool reshade::input::handle_window_message(const void *message_data)
 	if (input_window == s_windows.end())
 		return false;
 
+	RAWINPUT raw_data = {};
 	const std::shared_ptr<input> input = input_window->second.lock();
 
 	// At this point we have a shared pointer to the input object and no longer reference any memory from the windows list, so can release the lock
 	lock.unlock();
 
 	// Prevent input threads from modifying input while it is accessed elsewhere
-#ifdef _DEBUG
-	std::unique_lock<std::mutex> input_lock(input->_mutex, std::try_to_lock);
-	if (!input_lock.owns_lock())
-		return false; // Avoid recursive lock when message box is open
-#else
 	const std::lock_guard<std::mutex> input_lock = input->lock();
-#endif
 
 	// Calculate window client mouse position
 	ScreenToClient(static_cast<HWND>(input->_window), &details.pt);
@@ -121,13 +134,11 @@ bool reshade::input::handle_window_message(const void *message_data)
 
 	switch (details.message)
 	{
-	case WM_INPUT: {
-		RAWINPUT raw_data = {};
+	case WM_INPUT:
 		if (UINT raw_data_size = sizeof(raw_data);
-			GET_RAWINPUT_CODE_WPARAM(details.wParam) != RIM_INPUT ||
+			GET_RAWINPUT_CODE_WPARAM(details.wParam) != RIM_INPUT || // Ignore all input sink messages (when window is not focused)
 			GetRawInputData(reinterpret_cast<HRAWINPUT>(details.lParam), RID_INPUT, &raw_data, &raw_data_size, sizeof(raw_data.header)) == UINT(-1))
 			break;
-
 		switch (raw_data.header.dwType)
 		{
 		case RIM_TYPEMOUSE:
@@ -169,7 +180,8 @@ bool reshade::input::handle_window_message(const void *message_data)
 				break; // Input is already handled by 'WM_KEYDOWN' and friends (since legacy keyboard messages are enabled), so nothing to do here
 
 			if (raw_data.data.keyboard.VKey != 0xFF)
-				input->_keys[raw_data.data.keyboard.VKey] = (raw_data.data.keyboard.Flags & RI_KEY_BREAK) == 0 ? 0x88 : 0x08;
+				input->_keys[raw_data.data.keyboard.VKey] = (raw_data.data.keyboard.Flags & RI_KEY_BREAK) == 0 ? 0x88 : 0x08,
+				input->_keys_time[raw_data.data.keyboard.VKey] = details.time;
 
 			// No 'WM_CHAR' messages are sent if legacy keyboard messages are disabled, so need to generate text input manually here
 			// Cannot use the ToAscii function always as it seems to reset dead key state and thus calling it can break subsequent application input, should be fine here though since the application is already explicitly using raw input
@@ -177,22 +189,21 @@ bool reshade::input::handle_window_message(const void *message_data)
 				input->_text_input += ch;
 			break;
 		}
-		break; }
+		break;
 	case WM_CHAR:
 		input->_text_input += static_cast<wchar_t>(details.wParam);
 		break;
 	case WM_KEYDOWN:
 	case WM_SYSKEYDOWN:
 		assert(details.wParam < _countof(input->_keys));
-		// Only update state if the key is actually down
-		// This filters out invalid keyboard messages in Assetto Corsa
-		if (GetAsyncKeyState(static_cast<int>(details.wParam)))
-			input->_keys[details.wParam] = 0x88;
+		input->_keys[details.wParam] = 0x88;
+		input->_keys_time[details.wParam] = details.time;
 		break;
 	case WM_KEYUP:
 	case WM_SYSKEYUP:
 		assert(details.wParam < _countof(input->_keys));
 		input->_keys[details.wParam] = 0x08;
+		input->_keys_time[details.wParam] = details.time;
 		break;
 	case WM_LBUTTONDOWN:
 		input->_mouse_buttons[0] = 0x88;
@@ -339,6 +350,13 @@ void reshade::input::next_frame()
 	for (auto &state : _mouse_buttons)
 		state &= ~0x8;
 
+	// Reset any pressed down key states that have not been updated for more than 5 seconds
+	const DWORD time = GetTickCount();
+	for (unsigned int i = 0; i < 256; ++i)
+		if ((_keys[i] & 0x80) != 0 &&
+			(time - _keys_time[i]) > 5000)
+			_keys[i] = 0x08;
+
 	_text_input.clear();
 	_mouse_wheel_delta = 0;
 	_last_mouse_position[0] = _mouse_position[0];
@@ -352,10 +370,11 @@ void reshade::input::next_frame()
 		(GetKeyState(VK_MENU) & 0x8000) == 0)
 		_keys[VK_MENU] = 0x08;
 
-	// Update print screen state
+	// Update print screen state (there is no key down message, but the key up one is received via the message queue)
 	if ((_keys[VK_SNAPSHOT] & 0x80) == 0 &&
 		(GetAsyncKeyState(VK_SNAPSHOT) & 0x8000) != 0)
-		_keys[VK_SNAPSHOT] = 0x88;
+		_keys[VK_SNAPSHOT] = 0x88,
+		_keys_time[VK_SNAPSHOT] = time;
 }
 
 std::string reshade::input::key_name(unsigned int keycode)
@@ -428,7 +447,6 @@ static inline bool is_blocking_keyboard_input()
 HOOK_EXPORT BOOL WINAPI HookGetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
 {
 	static const auto trampoline = reshade::hooks::call(HookGetMessageA);
-
 	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax))
 		return FALSE;
 
@@ -448,7 +466,6 @@ HOOK_EXPORT BOOL WINAPI HookGetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterM
 HOOK_EXPORT BOOL WINAPI HookGetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
 {
 	static const auto trampoline = reshade::hooks::call(HookGetMessageW);
-
 	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax))
 		return FALSE;
 
@@ -468,7 +485,6 @@ HOOK_EXPORT BOOL WINAPI HookGetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterM
 HOOK_EXPORT BOOL WINAPI HookPeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
 {
 	static const auto trampoline = reshade::hooks::call(HookPeekMessageA);
-
 	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg))
 		return FALSE;
 
@@ -488,7 +504,6 @@ HOOK_EXPORT BOOL WINAPI HookPeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilter
 HOOK_EXPORT BOOL WINAPI HookPeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
 {
 	static const auto trampoline = reshade::hooks::call(HookPeekMessageW);
-
 	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg))
 		return FALSE;
 

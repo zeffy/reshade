@@ -4,6 +4,7 @@
  */
 
 using Microsoft.Win32;
+using ReShade.Utilities;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,6 +13,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Security.Principal;
 using System.Windows;
 using System.Windows.Input;
 
@@ -19,16 +21,25 @@ namespace ReShade.Setup
 {
 	public partial class WizardWindow
 	{
-		bool _is64Bit = false;
-		bool _isHeadless = false;
-		bool _isElevated = false;
-		string _configPath = null;
-		string _targetPath = null;
-		string _tempDownloadPath = null;
+		bool is64Bit = false;
+		bool isHeadless = false;
+		bool isElevated = WindowsIdentity.GetCurrent().Owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid);
+		bool isFinished = false;
+		string configPath = null;
+		string targetPath = null;
+		string commonPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ReShade");
 
 		public WizardWindow()
 		{
 			InitializeComponent();
+
+			ApiVulkanGlobal.IsChecked = IsVulkanLayerEnabled(Registry.LocalMachine);
+
+			if (isElevated)
+			{
+				ApiGroup.Visibility = Visibility.Visible;
+				ApiVulkanGlobalButton.Visibility = Visibility.Collapsed;
+			}
 		}
 
 		static void MoveFiles(string sourcePath, string targetPath)
@@ -82,39 +93,9 @@ namespace ReShade.Setup
 			return new ZipArchive(output, ZipArchiveMode.Read, false);
 		}
 
-		void ShowMessage(string title, string message, string description = null, bool done = false, int exitCode = -1)
-		{
-			if (done && _isHeadless)
-			{
-				Environment.Exit(exitCode);
-			}
-			else if (exitCode == 0)
-			{
-				message = "Edit ReShade settings";
-				SetupButton.IsEnabled = true;
-				SetupButton.Click -= OnSetupButtonClick;
-				SetupButton.Click += (object s, RoutedEventArgs e) => new SettingsWindow(_configPath) { Owner = this }.ShowDialog();
-			}
-
-			Glass.HideSystemMenu(this, !done);
-
-			Title = title;
-			Message.Text = message == null ? string.Empty : message;
-			MessageDescription.Visibility = string.IsNullOrEmpty(description) ? Visibility.Collapsed : Visibility.Visible;
-			MessageDescription.Text = description;
-
-		}
-
-		void RestartAsAdmin()
-		{
-			Process.Start(new ProcessStartInfo { Verb = "runas", FileName = Assembly.GetExecutingAssembly().Location, Arguments = $"\"{_targetPath}\" --elevated --left {Left} --top {Top}" });
-
-			Close();
-		}
-
 		void AddSearchPath(List<string> searchPaths, string newPath)
 		{
-			string basePath = Path.GetDirectoryName(_targetPath);
+			string basePath = Path.GetDirectoryName(ApiVulkan.IsChecked.Value ? commonPath : targetPath);
 			Directory.SetCurrentDirectory(basePath);
 
 			bool pathExists = false;
@@ -135,7 +116,15 @@ namespace ReShade.Setup
 		}
 		void WriteSearchPaths(string targetPathShaders, string targetPathTextures)
 		{
-			var iniFile = new IniFile(_configPath);
+			// Vulkan uses a common ReShade DLL for all applications, which is not in the location the shaders and textures are installed to, so make paths absolute
+			if (ApiVulkan.IsChecked.Value)
+			{
+				string targetDir = Path.GetDirectoryName(targetPath);
+				targetPathShaders = Path.GetFullPath(Path.Combine(targetDir, targetPathShaders));
+				targetPathTextures = Path.GetFullPath(Path.Combine(targetDir, targetPathTextures));
+			}
+
+			var iniFile = new IniFile(configPath);
 			List<string> paths = null;
 
 			iniFile.GetValue("GENERAL", "EffectSearchPaths", out var effectSearchPaths);
@@ -159,11 +148,140 @@ namespace ReShade.Setup
 			iniFile.Save();
 		}
 
+		bool EnableVulkanLayer(RegistryKey hive)
+		{
+			try
+			{
+				if (Directory.Exists(commonPath))
+				{
+					Directory.Delete(commonPath, true);
+				}
+
+				Directory.CreateDirectory(commonPath);
+
+				using (ZipArchive zip = ExtractArchive())
+				{
+					zip.ExtractToDirectory(commonPath);
+				}
+
+				if (Environment.Is64BitOperatingSystem)
+				{
+					using (RegistryKey key = hive.CreateSubKey(@"Software\Khronos\Vulkan\ImplicitLayers"))
+					{
+						key.SetValue(Path.Combine(commonPath, "ReShade64.json"), 0, RegistryValueKind.DWord);
+					}
+				}
+
+				using (RegistryKey key = hive.CreateSubKey(Environment.Is64BitOperatingSystem ? @"Software\Wow6432Node\Khronos\Vulkan\ImplicitLayers" : @"Software\Khronos\Vulkan\ImplicitLayers"))
+				{
+					key.SetValue(Path.Combine(commonPath, "ReShade32.json"), 0, RegistryValueKind.DWord);
+				}
+
+				return true;
+			}
+			catch
+			{
+				return false;
+			}
+		}
+		bool DisableVulkanLayer(RegistryKey hive)
+		{
+			try
+			{
+				if (Directory.Exists(commonPath))
+				{
+					Directory.Delete(commonPath, true);
+				}
+
+				if (Environment.Is64BitOperatingSystem)
+				{
+					using (RegistryKey key = hive.CreateSubKey(@"Software\Khronos\Vulkan\ImplicitLayers"))
+					{
+						key.DeleteValue(Path.Combine(commonPath, "ReShade64.json"));
+					}
+				}
+
+				using (RegistryKey key = hive.CreateSubKey(Environment.Is64BitOperatingSystem ? @"Software\Wow6432Node\Khronos\Vulkan\ImplicitLayers" : @"Software\Khronos\Vulkan\ImplicitLayers"))
+				{
+					key.DeleteValue(Path.Combine(commonPath, "ReShade32.json"));
+				}
+
+				return true;
+			}
+			catch
+			{
+				return false;
+			}
+		}
+		bool IsVulkanLayerEnabled(RegistryKey hive)
+		{
+			using (RegistryKey key = hive.OpenSubKey(@"Software\Khronos\Vulkan\ImplicitLayers"))
+			{
+				return key?.GetValue(Path.Combine(commonPath, Environment.Is64BitOperatingSystem ? "ReShade64.json" : "ReShade32.json")) != null;
+			}
+		}
+
+		void UpdateStatus(string title, string message, string description = null)
+		{
+			Title = title;
+			Message.Text = message ?? string.Empty;
+			MessageDescription.Visibility = string.IsNullOrEmpty(description) ? Visibility.Collapsed : Visibility.Visible;
+			MessageDescription.Text = description;
+
+			Glass.HideSystemMenu(this);
+		}
+		void UpdateStatusAndFinish(bool success, string message, string description = null)
+		{
+			isFinished = true;
+			SetupButton.IsEnabled = false; // Use button as text box only
+
+			UpdateStatus(success ? "Succeeded!" : "Failed!", message, description);
+
+			Glass.HideSystemMenu(this, false);
+
+			if (isHeadless)
+			{
+				Environment.Exit(success ? 0 : 1);
+			}
+		}
+
+		bool RestartWithElevatedPrivileges()
+		{
+			var startInfo = new ProcessStartInfo {
+				Verb = "runas",
+				FileName = Assembly.GetExecutingAssembly().Location,
+				Arguments = $"\"{targetPath}\" --elevated --left {Left} --top {Top}"
+			};
+
+			if (ApiD3D9.IsChecked.Value)
+				startInfo.Arguments += " --api d3d9";
+			if (ApiDXGI.IsChecked.Value)
+				startInfo.Arguments += " --api dxgi";
+			if (ApiOpenGL.IsChecked.Value)
+				startInfo.Arguments += " --api opengl";
+			if (ApiVulkan.IsChecked.Value)
+				startInfo.Arguments += " --api vulkan";
+
+			if (isFinished)
+				startInfo.Arguments += " --finished";
+
+			try
+			{
+				Process.Start(startInfo);
+				Close();
+				return true;
+			}
+			catch
+			{
+				return false;
+			}
+		}
+
 		void InstallationStep0()
 		{
-			if (!_isElevated && !IsWritable(Path.GetDirectoryName(_targetPath)))
+			if (!isElevated && !IsWritable(Path.GetDirectoryName(targetPath)))
 			{
-				RestartAsAdmin();
+				RestartWithElevatedPrivileges();
 			}
 			else
 			{
@@ -172,28 +290,25 @@ namespace ReShade.Setup
 		}
 		void InstallationStep1()
 		{
+			ApiGroup.IsEnabled = true;
 			SetupButton.IsEnabled = false;
-			Glass.HideSystemMenu(this);
+			ApiGroup.Visibility = ApiD3D9.Visibility = ApiDXGI.Visibility = ApiOpenGL.Visibility = ApiVulkan.Visibility = Visibility.Visible;
+			ApiVulkanGlobal.Visibility = ApiVulkanGlobalButton.Visibility = Visibility.Collapsed;
 
-			var info = FileVersionInfo.GetVersionInfo(_targetPath);
-			string name = !string.IsNullOrEmpty(info.ProductName) ? info.ProductName : Path.GetFileNameWithoutExtension(_targetPath);
-			var peInfo = new PEInfo(_targetPath);
+			var info = FileVersionInfo.GetVersionInfo(targetPath);
+			var name = info.ProductName ?? Path.GetFileNameWithoutExtension(targetPath);
 
-			ShowMessage("Working on " + name + " ...", "Analyzing " + name + " ...");
+			UpdateStatus("Working on " + name + " ...", "Analyzing " + name + " ...");
 
-			_is64Bit = peInfo.Type == PEInfo.BinaryType.IMAGE_FILE_MACHINE_AMD64;
+			var peInfo = new PEInfo(targetPath);
+			is64Bit = peInfo.Type == PEInfo.BinaryType.IMAGE_FILE_MACHINE_AMD64;
 
-			string nameModule = peInfo.Modules.FirstOrDefault(s =>
+			var nameModule = peInfo.Modules.FirstOrDefault(s =>
 				s.StartsWith("d3d8", StringComparison.OrdinalIgnoreCase) ||
 				s.StartsWith("d3d9", StringComparison.OrdinalIgnoreCase) ||
 				s.StartsWith("dxgi", StringComparison.OrdinalIgnoreCase) ||
 				s.StartsWith("opengl32", StringComparison.OrdinalIgnoreCase) ||
-				s.StartsWith("vulkan-1", StringComparison.OrdinalIgnoreCase));
-
-			if (nameModule == null)
-			{
-				nameModule = string.Empty;
-			}
+				s.StartsWith("vulkan-1", StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
 
 			bool isApiD3D8 = nameModule.StartsWith("d3d8", StringComparison.OrdinalIgnoreCase);
 			bool isApiD3D9 = isApiD3D8 || nameModule.StartsWith("d3d9", StringComparison.OrdinalIgnoreCase);
@@ -201,129 +316,111 @@ namespace ReShade.Setup
 			bool isApiOpenGL = nameModule.StartsWith("opengl32", StringComparison.OrdinalIgnoreCase);
 			bool isApiVulkan = nameModule.StartsWith("vulkan-1", StringComparison.OrdinalIgnoreCase);
 
-			if (isApiD3D8 && !_isHeadless)
+			if (isApiD3D8 && !isHeadless)
 			{
 				MessageBox.Show(this, "It looks like the target application uses Direct3D 8. You'll have to download an additional wrapper from 'http://reshade.me/d3d8to9' which converts all API calls to Direct3D 9 in order to use ReShade.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
 			}
 
 			Message.Text = "Select the rendering API the game uses:";
-			ApiGroup.IsEnabled = true;
-			ApiDirect3D9.IsChecked = isApiD3D9;
-			ApiDirectXGI.IsChecked = isApiDXGI;
+
+			ApiD3D9.IsChecked = isApiD3D9;
+			ApiDXGI.IsChecked = isApiDXGI;
 			ApiOpenGL.IsChecked = isApiOpenGL;
 			ApiVulkan.IsChecked = isApiVulkan;
 		}
 		void InstallationStep2()
 		{
-			string nameModule = null;
 			ApiGroup.IsEnabled = false;
-			if (ApiDirect3D9.IsChecked == true)
+			SetupButton.IsEnabled = false;
+			ApiGroup.Visibility = ApiD3D9.Visibility = ApiDXGI.Visibility = ApiOpenGL.Visibility = ApiVulkan.Visibility = Visibility.Visible;
+			ApiVulkanGlobal.Visibility = ApiVulkanGlobalButton.Visibility = Visibility.Collapsed;
+
+			string targetDir = Path.GetDirectoryName(targetPath);
+			configPath = Path.Combine(targetDir, "ReShade.ini");
+
+			if (ApiVulkan.IsChecked != true)
 			{
-				nameModule = "d3d9.dll";
-			}
-
-			if (ApiDirectXGI.IsChecked == true)
-			{
-				nameModule = "dxgi.dll";
-			}
-
-			if (ApiOpenGL.IsChecked == true)
-			{
-				nameModule = "opengl32.dll";
-			}
-
-			if (ApiVulkan.IsChecked == true)
-			{
-				nameModule = _is64Bit ? "ReShade64.dll" : "ReShade32.dll";
-			}
-
-			string targetDir = Path.GetDirectoryName(_targetPath);
-			string pathModule = Path.Combine(targetDir, nameModule);
-
-			_configPath = Path.ChangeExtension(pathModule, ".ini");
-			if (!File.Exists(_configPath))
-			{
-				_configPath = Path.Combine(targetDir, "ReShade.ini");
-			}
-
-			if (File.Exists(pathModule) && !_isHeadless)
-			{
-				var result = MessageBox.Show(this, "Do you want to overwrite the existing installation or uninstall ReShade?\n\nPress 'Yes' to overwrite or 'No' to uninstall.", string.Empty, MessageBoxButton.YesNoCancel);
-
-				if (result == MessageBoxResult.No)
+				string pathModule = null;
+				if (ApiD3D9.IsChecked == true)
 				{
-					try
-					{
-						File.Delete(pathModule);
-						if (File.Exists(_configPath))
-						{
-							File.Delete(_configPath);
-						}
+					pathModule = "d3d9.dll";
+				}
+				if (ApiDXGI.IsChecked == true)
+				{
+					pathModule = "dxgi.dll";
+				}
+				if (ApiOpenGL.IsChecked == true)
+				{
+					pathModule = "opengl32.dll";
+				}
 
-						if (File.Exists(Path.ChangeExtension(pathModule, ".log")))
-						{
-							File.Delete(Path.ChangeExtension(pathModule, ".log"));
-						}
+				if (pathModule == null)
+				{
+					// No API selected, abort immediately
+					return;
+				}
 
-						if (Directory.Exists(Path.Combine(targetDir, "reshade-shaders")))
-						{
-							Directory.Delete(Path.Combine(targetDir, "reshade-shaders"), true);
-						}
-					}
-					catch (Exception ex)
+				pathModule = Path.Combine(targetDir, pathModule);
+
+				var alternativeConfigPath = Path.ChangeExtension(pathModule, ".ini");
+				if (File.Exists(alternativeConfigPath))
+				{
+					configPath = alternativeConfigPath;
+				}
+
+				if (File.Exists(pathModule) && !isHeadless)
+				{
+					var result = MessageBox.Show(this, "Do you want to overwrite the existing installation or uninstall ReShade?\n\nPress 'Yes' to overwrite or 'No' to uninstall.", string.Empty, MessageBoxButton.YesNoCancel);
+
+					if (result == MessageBoxResult.No)
 					{
-						ShowMessage("Failed!", "Unable to delete some files.", ex.Message, true, 1);
+						try
+						{
+							File.Delete(pathModule);
+
+							if (File.Exists(configPath))
+							{
+								File.Delete(configPath);
+							}
+
+							if (File.Exists(Path.ChangeExtension(pathModule, ".log")))
+							{
+								File.Delete(Path.ChangeExtension(pathModule, ".log"));
+							}
+
+							if (Directory.Exists(Path.Combine(targetDir, "reshade-shaders")))
+							{
+								Directory.Delete(Path.Combine(targetDir, "reshade-shaders"), true);
+							}
+
+							UpdateStatusAndFinish(true, "Successfully uninstalled.");
+						}
+						catch (Exception ex)
+						{
+							UpdateStatusAndFinish(false, "Unable to delete some files.", ex.Message);
+						}
 						return;
 					}
-
-					ShowMessage("Succeeded!", "Successfully uninstalled.", null, true);
-					return;
-				}
-				else if (result != MessageBoxResult.Yes)
-				{
-					ShowMessage("Failed", "Existing installation found.", null, true, 1);
-					return;
-				}
-			}
-
-			try
-			{
-				using (ZipArchive zip = ExtractArchive())
-				{
-					if (zip.Entries.Count != 4)
+					else if (result != MessageBoxResult.Yes)
 					{
-						throw new FileFormatException("Expected ReShade archive to contain ReShade DLLs");
-					}
-
-					// 0: ReShade32.dll
-					// 2: ReShade64.dll
-					using (Stream input = zip.Entries[_is64Bit ? 2 : 0].Open())
-					using (FileStream output = File.Create(pathModule))
-					{
-						input.CopyTo(output);
+						UpdateStatusAndFinish(false, "Existing installation found.");
+						return;
 					}
 				}
-			}
-			catch (Exception ex)
-			{
-				ShowMessage("Failed!", "Unable to write file \"" + pathModule + "\".", ex.Message, true, 1);
-				return;
-			}
 
-			// Vulkan requires some more consideration, since ReShade acts as a layer there
-			if (ApiVulkan.IsChecked == true)
-			{
-				string pathManifest = Path.ChangeExtension(pathModule, ".json");
-
-				// Install layer manifest
 				try
 				{
 					using (ZipArchive zip = ExtractArchive())
 					{
-						// 1: ReShade32.json
-						// 3: ReShade64.json
-						using (Stream input = zip.Entries[_is64Bit ? 3 : 1].Open())
-						using (FileStream output = File.Create(pathManifest))
+						if (zip.Entries.Count != 4)
+						{
+							throw new FileFormatException("Expected ReShade archive to contain ReShade DLLs");
+						}
+
+						// 0: ReShade32.dll
+						// 2: ReShade64.dll
+						using (Stream input = zip.Entries[is64Bit ? 2 : 0].Open())
+						using (FileStream output = File.Create(pathModule))
 						{
 							input.CopyTo(output);
 						}
@@ -331,38 +428,31 @@ namespace ReShade.Setup
 				}
 				catch (Exception ex)
 				{
-					ShowMessage("Failed!", "Unable to write file \"" + pathManifest + "\".", ex.Message, true, 1);
+					UpdateStatusAndFinish(false, "Unable to write file \"" + pathModule + "\".", ex.Message);
 					return;
 				}
-
-				// Create a batch file to launch the game with correct environment variables set for Vulkan
-				File.WriteAllText(Path.Combine(targetDir, Path.GetFileNameWithoutExtension(_targetPath) + "_with_reshade.bat"),
-					"set VK_LAYER_PATH=" + targetDir + ";%VK_LAYER_PATH%\r\n" +
-					"set VK_INSTANCE_LAYERS=VK_LAYER_reshade\r\n" +
-					"@start \"\" \"" + _targetPath + "\"");
 			}
 
-			if (_isHeadless || MessageBox.Show(this, "Do you wish to download a collection of standard effects from https://github.com/crosire/reshade-shaders?", string.Empty, MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+			if (isHeadless || MessageBox.Show(this, "Do you wish to download a collection of standard effects from https://github.com/crosire/reshade-shaders?", string.Empty, MessageBoxButton.YesNo) == MessageBoxResult.Yes)
 			{
 				InstallationStep3();
 			}
 			else
 			{
-				if (!File.Exists(_configPath))
+				// Add default search paths if no config exists
+				if (!File.Exists(configPath))
 				{
-					string targetDirectory = Path.GetDirectoryName(_targetPath);
-
 					WriteSearchPaths(".\\", ".\\");
 				}
 
-				ShowMessage("Succeeded!", "Successfully installed.", null, true, 0);
+				InstallationStep5();
 			}
 		}
 		void InstallationStep3()
 		{
-			ShowMessage("Downloading ...", "Downloading ...");
+			UpdateStatus("Downloading ...", "Downloading ...");
 
-			_tempDownloadPath = Path.GetTempFileName();
+			string downloadPath = Path.GetTempFileName();
 
 			// Add support for TLS 1.2, so that HTTPS connection to GitHub succeeds
 			ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
@@ -372,11 +462,11 @@ namespace ReShade.Setup
 			client.DownloadFileCompleted += (object sender, System.ComponentModel.AsyncCompletedEventArgs e) => {
 				if (e.Error != null)
 				{
-					ShowMessage("Failed!", "Unable to download archive.", e.Error.Message, true, 1);
+					UpdateStatusAndFinish(false, "Unable to download archive.", e.Error.Message);
 				}
 				else
 				{
-					InstallationStep4();
+					InstallationStep4(downloadPath);
 				}
 			};
 
@@ -386,21 +476,21 @@ namespace ReShade.Setup
 
 			try
 			{
-				client.DownloadFileAsync(new Uri("https://github.com/crosire/reshade-shaders/archive/master.zip"), _tempDownloadPath);
+				client.DownloadFileAsync(new Uri("https://github.com/crosire/reshade-shaders/archive/master.zip"), downloadPath);
 			}
 			catch (Exception ex)
 			{
-				ShowMessage("Failed!", "Unable to download archive.", ex.Message);
+				UpdateStatus("Failed!", "Unable to download archive.", ex.Message);
 			}
 		}
-		void InstallationStep4()
+		void InstallationStep4(string downloadPath)
 		{
 			Message.Text = "Extracting ...";
 
 			string tempPath = Path.Combine(Path.GetTempPath(), "reshade-shaders-master");
 			string tempPathShaders = Path.Combine(tempPath, "Shaders");
 			string tempPathTextures = Path.Combine(tempPath, "Textures");
-			string targetPath = Path.Combine(Path.GetDirectoryName(_targetPath), "reshade-shaders");
+			string targetPath = Path.Combine(Path.GetDirectoryName(this.targetPath), "reshade-shaders");
 			string targetPathShaders = Path.Combine(targetPath, "Shaders");
 			string targetPathTextures = Path.Combine(targetPath, "Textures");
 
@@ -418,21 +508,21 @@ namespace ReShade.Setup
 					Directory.Delete(tempPath, true);
 				}
 
-				ZipFile.ExtractToDirectory(_tempDownloadPath, Path.GetTempPath());
+				ZipFile.ExtractToDirectory(downloadPath, Path.GetTempPath());
 
 				MoveFiles(tempPathShaders, targetPathShaders);
 				MoveFiles(tempPathTextures, targetPathTextures);
 
-				File.Delete(_tempDownloadPath);
+				File.Delete(downloadPath);
 				Directory.Delete(tempPath, true);
 			}
 			catch (Exception ex)
 			{
-				ShowMessage("Failed!", "Unable to extract downloaded archive.", ex.Message, true, 1);
+				UpdateStatusAndFinish(false, "Unable to extract downloaded archive.", ex.Message);
 				return;
 			}
 
-			if (!_isHeadless)
+			if (!isHeadless)
 			{
 				var wnd = new SelectWindow(Directory.GetFiles(targetPathShaders));
 				wnd.Owner = this;
@@ -466,7 +556,36 @@ namespace ReShade.Setup
 
 			WriteSearchPaths(".\\reshade-shaders\\Shaders", ".\\reshade-shaders\\Textures");
 
-			ShowMessage("Succeeded!", null, null, true, 0);
+			InstallationStep5();
+		}
+		void InstallationStep5()
+		{
+			string description = null;
+			if (ApiVulkan.IsChecked.Value)
+			{
+				description = "You need to keep the setup tool open for ReShade to work in Vulkan games!\nAlternatively check the option below:";
+
+				ApiGroup.IsEnabled = true;
+				ApiD3D9.Visibility = ApiDXGI.Visibility = ApiOpenGL.Visibility = ApiVulkan.Visibility = Visibility.Collapsed;
+				ApiVulkanGlobal.Visibility = Visibility.Visible;
+
+				if (isElevated)
+				{
+					ApiGroup.Visibility = Visibility.Visible;
+					ApiVulkanGlobalButton.Visibility = Visibility.Collapsed;
+				}
+				else
+				{
+					ApiGroup.Visibility = Visibility.Collapsed;
+					ApiVulkanGlobalButton.Visibility = Visibility.Visible;
+				}
+			}
+
+			UpdateStatusAndFinish(true, "Edit ReShade settings", description);
+
+			SetupButton.IsEnabled = true;
+			SetupButton.Click -= OnSetupButtonClick;
+			SetupButton.Click += (object s, RoutedEventArgs e) => new SettingsWindow(configPath) { Owner = this }.ShowDialog();
 		}
 
 		void OnWindowInit(object sender, EventArgs e)
@@ -479,19 +598,24 @@ namespace ReShade.Setup
 			var args = Environment.GetCommandLineArgs().Skip(1).ToArray();
 
 			bool hasApi = false;
-			bool hasTargetPath = false;
+			bool hasFinished = false;
 
 			// Parse command line arguments
 			for (int i = 0; i < args.Length; i++)
 			{
 				if (args[i] == "--headless")
 				{
-					_isHeadless = true;
+					isHeadless = true;
 					continue;
 				}
 				if (args[i] == "--elevated")
 				{
-					_isElevated = true;
+					isElevated = true;
+					continue;
+				}
+				if (args[i] == "--finished")
+				{
+					hasFinished = true;
 					continue;
 				}
 
@@ -502,9 +626,10 @@ namespace ReShade.Setup
 						hasApi = true;
 
 						string api = args[++i];
-						ApiDirect3D9.IsChecked = api == "d3d9";
-						ApiDirectXGI.IsChecked = api == "dxgi" || api == "d3d10" || api == "d3d11";
+						ApiD3D9.IsChecked = api == "d3d9";
+						ApiDXGI.IsChecked = api == "dxgi" || api == "d3d10" || api == "d3d11";
 						ApiOpenGL.IsChecked = api == "opengl";
+						ApiVulkan.IsChecked = api == "vulkan";
 						continue;
 					}
 
@@ -522,26 +647,93 @@ namespace ReShade.Setup
 
 				if (File.Exists(args[i]))
 				{
-					hasTargetPath = true;
-
-					_targetPath = args[i];
+					targetPath = args[i];
+					configPath = Path.Combine(Path.GetDirectoryName(targetPath), "ReShade.ini");
 				}
 			}
 
-			if (hasTargetPath)
+			if (targetPath != null)
 			{
-				InstallationStep1();
-
-				if (hasApi)
+				if (hasFinished)
+				{
+					InstallationStep5();
+				}
+				else if (hasApi)
 				{
 					InstallationStep2();
 				}
+				else
+				{
+					InstallationStep1();
+				}
+				return;
+			}
+
+			if (!ApiVulkanGlobal.IsChecked.Value)
+			{
+				// Enable Vulkan layer while the setup tool is running
+				EnableVulkanLayer(Registry.CurrentUser);
+			}
+			else
+			{
+				// Update existing Vulkan layer with the included version
+				EnableVulkanLayer(Registry.LocalMachine);
+			}
+		}
+		void OnWindowClosed(object sender, EventArgs e)
+		{
+			if (!ApiVulkanGlobal.IsChecked.Value)
+			{
+				// Disable Vulkan layer again when the setup tool is being closed
+				DisableVulkanLayer(Registry.CurrentUser);
 			}
 		}
 
 		void OnApiChecked(object sender, RoutedEventArgs e)
 		{
 			InstallationStep2();
+		}
+		void OnApiVulkanGlobalChecked(object sender, RoutedEventArgs e)
+		{
+			if (sender is System.Windows.Controls.Button button)
+			{
+				RestartWithElevatedPrivileges();
+				return;
+			}
+
+			var checkbox = sender as System.Windows.Controls.CheckBox;
+			if (checkbox.IsChecked == IsVulkanLayerEnabled(Registry.LocalMachine))
+			{
+				return;
+			}
+
+			// Should have elevated privileges at this point
+			if (!isElevated)
+			{
+				// Reset check box to previous value if unable to get elevated privileges
+				checkbox.IsChecked = !checkbox.IsChecked;
+				return;
+			}
+
+			// Switch between installing to HKLM and HKCU based on check box value
+			if (checkbox.IsChecked.Value)
+			{
+				DisableVulkanLayer(Registry.CurrentUser);
+				if (!EnableVulkanLayer(Registry.LocalMachine))
+				{
+					UpdateStatusAndFinish(false, "Failed to install global Vulkan layer.");
+					checkbox.IsChecked = !checkbox.IsChecked;
+				}
+			}
+			else
+			{
+				DisableVulkanLayer(Registry.LocalMachine);
+				if (!EnableVulkanLayer(Registry.CurrentUser))
+				{
+					UpdateStatusAndFinish(false, "Failed to install user local Vulkan layer.");
+					checkbox.IsChecked = !checkbox.IsChecked;
+				}
+			}
 		}
 		void OnSetupButtonClick(object sender, RoutedEventArgs e)
 		{
@@ -556,8 +748,7 @@ namespace ReShade.Setup
 				}
 				catch (Exception ex)
 				{
-					ShowMessage("Failed!", "Unable to extract files.", ex.Message, true);
-					SetupButton.IsEnabled = false;
+					UpdateStatusAndFinish(false, "Unable to extract files.", ex.Message);
 					return;
 				}
 
@@ -565,13 +756,17 @@ namespace ReShade.Setup
 				return;
 			}
 
-			var dlg = new OpenFileDialog { Filter = "Applications|*.exe", DefaultExt = ".exe", Multiselect = false, ValidateNames = true, CheckFileExists = true };
+			var dlg = new OpenFileDialog
+			{
+				Filter = "Applications|*.exe",
+				DefaultExt = ".exe",
+				Multiselect = false,
+				ValidateNames = true,
+				CheckFileExists = true
+			};
 
 			// Open Steam game installation directory by default if it exists
-			string steamPath = Path.Combine(
-				Environment.GetFolderPath(Environment.Is64BitOperatingSystem ? Environment.SpecialFolder.ProgramFilesX86 : Environment.SpecialFolder.ProgramFiles),
-				"Steam", "steamapps", "common");
-
+			string steamPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Steam", "steamapps", "common");
 			if (Directory.Exists(steamPath))
 			{
 				dlg.InitialDirectory = steamPath;
@@ -579,7 +774,7 @@ namespace ReShade.Setup
 
 			if (dlg.ShowDialog(this) == true)
 			{
-				_targetPath = dlg.FileName;
+				targetPath = dlg.FileName;
 
 				InstallationStep0();
 			}
@@ -588,7 +783,7 @@ namespace ReShade.Setup
 		{
 			if (e.Data.GetData(DataFormats.FileDrop, true) is string[] files && files.Length >= 1)
 			{
-				_targetPath = files[0];
+				targetPath = files[0];
 
 				InstallationStep0();
 			}

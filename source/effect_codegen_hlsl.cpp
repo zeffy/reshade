@@ -5,7 +5,11 @@
 
 #include "effect_parser.hpp"
 #include "effect_codegen.hpp"
-#include <assert.h>
+#include <cmath> // signbit, isinf, isnan
+#include <cstdio> // snprintf
+#include <cassert>
+#include <cstring> // stricmp
+#include <algorithm> // std::max
 
 using namespace reshadefx;
 
@@ -38,7 +42,6 @@ private:
 	bool _debug_info = false;
 	bool _uniforms_to_spec_constants = false;
 	unsigned int _shader_model = 0;
-	unsigned int _current_cbuffer_size = 0;
 
 	void write_result(module &module) override
 	{
@@ -57,6 +60,9 @@ private:
 
 			if (!_cbuffer_block.empty())
 				module.hlsl += _cbuffer_block;
+
+			// Offsets were multiplied in 'define_uniform', so adjust total size here accordingly
+			module.total_uniform_size *= 4;
 		}
 
 		module.hlsl += _blocks.at(0);
@@ -156,10 +162,7 @@ private:
 		assert(type.is_numeric());
 
 		if (!type.is_scalar())
-		{
-			write_type<false, false>(s, type);
-			s += '(';
-		}
+			write_type<false, false>(s, type), s += '(';
 
 		for (unsigned int i = 0, components = type.components(); i < components; ++i)
 		{
@@ -183,8 +186,8 @@ private:
 					s += std::signbit(data.as_float[i]) ? "1.#INF" : "-1.#INF";
 					break;
 				}
-				std::string temp(_scprintf("%.8f", data.as_float[i]), '\0');
-				sprintf_s(temp.data(), temp.size() + 1, "%.8f", data.as_float[i]);
+				char temp[64] = "";
+				std::snprintf(temp, sizeof(temp), "%.8f", data.as_float[i]);
 				s += temp;
 				break;
 			}
@@ -194,9 +197,7 @@ private:
 		}
 
 		if (!type.is_scalar())
-		{
 			s += ')';
-		}
 	}
 	template <bool force_source = false>
 	void write_location(std::string &s, const location &loc)
@@ -228,16 +229,17 @@ private:
 		return '_' + std::to_string(id);
 	}
 
-	template <naming naming = naming::general>
+	template <naming naming_type = naming::general>
 	void define_name(const id id, std::string name)
 	{
 		assert(!name.empty());
-		if constexpr (naming != naming::expression)
+		if constexpr (naming_type != naming::expression)
 			if (name[0] == '_')
 				return; // Filter out names that may clash with automatic ones
-		if constexpr (naming == naming::general)
+		name = escape_name(std::move(name));
+		if constexpr (naming_type == naming::general)
 			if (std::find_if(_names.begin(), _names.end(), [&name](const auto &it) { return it.second == name; }) != _names.end())
-				name += '_' + std::to_string(id);
+				name += '_' + std::to_string(id); // Append a numbered suffix if the name already exists
 		_names[id] = std::move(name);
 	}
 
@@ -267,6 +269,24 @@ private:
 		}
 
 		return semantic;
+	}
+
+	static std::string escape_name(std::string name)
+	{
+		static const auto stringicmp = [](const std::string &a, const std::string &b) {
+#ifdef _WIN32
+			return _stricmp(a.c_str(), b.c_str()) == 0;
+#else
+			return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](char a, char b) { return tolower(a) == tolower(b); });
+#endif
+		};
+
+		// HLSL compiler complains about "technique" and "pass" names in strict mode (no matter the casing)
+		if (stringicmp(name, "pass") ||
+			stringicmp(name, "technique"))
+			name += "_RESERVED";
+
+		return name;
 	}
 
 	static void increase_indentation_level(std::string &block)
@@ -390,6 +410,11 @@ private:
 	}
 	id   define_uniform(const location &loc, uniform_info &info) override
 	{
+		info.size = info.type.is_matrix() ? (info.type.rows - 1) * 16u + info.type.cols * 4 : info.type.rows * 4;
+		// Arrays are not packed in HLSL by default, each element is stored in a four-component vector
+		if (info.type.is_array())
+			info.size = std::max(16u, info.size) * info.type.array_length;
+
 		const id res = make_id();
 
 		define_name<naming::unique>(res, info.name);
@@ -411,15 +436,21 @@ private:
 		}
 		else
 		{
-			const unsigned int size = info.type.rows * info.type.cols * std::max(1, info.type.array_length) * 4;
-			const unsigned int alignment = 16 - (_current_cbuffer_size % 16);
-
-			_current_cbuffer_size += (size > alignment && (alignment != 16 || size <= 16)) ? size + alignment : size;
-
-			info.size = size;
-			info.offset = _current_cbuffer_size - size;
+			// Data is packed into 4-byte boundaries (see https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-packing-rules)
+			// This is already guaranteed, since all types are at least 4-byte in size
+			info.offset = _module.total_uniform_size;
+			// Additionally HLSL packs data so that it does not cross a 16-byte boundary
+			const uint32_t remaining = 16 - (info.offset & 15);
+			if (remaining != 16 && info.size > remaining)
+				info.offset += remaining;
+			_module.total_uniform_size = info.offset + info.size;
 
 			write_location<true>(_cbuffer_block, loc);
+
+			if (_shader_model >= 40)
+				_cbuffer_block += '\t';
+			if (info.type.is_matrix()) // Force row major matrices
+				_cbuffer_block += "row_major ";
 
 			if (_shader_model < 40)
 			{
@@ -432,12 +463,12 @@ private:
 				info.offset *= 4;
 
 				// Every constant register is 16 bytes wide, so divide memory offset by 16 to get the constant register index
+				// Note: All uniforms are floating-point in shader model 3, even if the uniform type says different!!
 				write_type(_cbuffer_block, type);
 				_cbuffer_block += ' ' + id_to_name(res) + " : register(c" + std::to_string(info.offset / 16) + ");\n";
 			}
 			else
 			{
-				_cbuffer_block += '\t';
 				write_type(_cbuffer_block, info.type);
 				_cbuffer_block += ' ' + id_to_name(res) + ";\n";
 			}
@@ -528,13 +559,14 @@ private:
 
 		return info.definition;
 	}
+
 	void define_entry_point(const function_info &func, bool is_ps) override
 	{
 		if (const auto it = std::find_if(_module.entry_points.begin(), _module.entry_points.end(),
 			[&func](const auto &ep) { return ep.name == func.unique_name; }); it != _module.entry_points.end())
 			return;
 
-		_module.entry_points.push_back(entry_point_info { func.unique_name, is_ps });
+		_module.entry_points.push_back({ func.unique_name, is_ps });
 
 		// Only have to rewrite the entry point function signature in shader model 3
 		if (_shader_model >= 40)
@@ -640,15 +672,17 @@ private:
 			"_m30", "_m31", "_m32", "_m33"
 		};
 
-		std::string expr_code = id_to_name(exp.base);
+		std::string type, expr_code = id_to_name(exp.base);
 
 		for (const auto &op : exp.chain)
 		{
 			switch (op.op)
 			{
 			case expression::operation::op_cast:
-				{ std::string type; write_type<false, false>(type, op.to);
-				expr_code = "((" + type + ')' + expr_code + ')'; } // Cast in parentheses so that a subsequent operation operates on the casted value
+				type.clear();
+				write_type<false, false>(type, op.to);
+				// Cast is in parentheses so that a subsequent operation operates on the casted value
+				expr_code = "((" + type + ')' + expr_code + ')';
 				break;
 			case expression::operation::op_member:
 				expr_code += '.';
@@ -658,7 +692,11 @@ private:
 				expr_code += '[' + id_to_name(op.index) + ']';
 				break;
 			case expression::operation::op_constant_index:
-				expr_code += '[' + std::to_string(op.index) + ']';
+				if (op.from.is_vector() && !op.from.is_array())
+					expr_code += '.',
+					expr_code += "xyzw"[op.index];
+				else
+					expr_code += '[' + std::to_string(op.index) + ']';
 				break;
 			case expression::operation::op_swizzle:
 				expr_code += '.';
@@ -676,6 +714,7 @@ private:
 			// Need to store value in a new variable to comply with request for a new ID
 			std::string &code = _blocks.at(_current_block);
 
+			code += '\t';
 			write_type(code, exp.type);
 			code += ' ' + id_to_name(res) + " = " + expr_code + ";\n";
 		}
@@ -888,7 +927,8 @@ private:
 	}
 	id   emit_ternary_op(const location &loc, tokenid op, const type &res_type, id condition, id true_value, id false_value) override
 	{
-		assert(op == tokenid::question); /* unreferened parameter */ op;
+		if (op != tokenid::question)
+			return assert(false), 0; // Should never happen, since this is the only ternary operator currently supported
 
 		const id res = make_id();
 
@@ -1311,6 +1351,17 @@ private:
 		std::string &code = _blocks.at(_current_block);
 
 		code += "\tdiscard;\n";
+
+		const auto &return_type = _functions.back()->return_type;
+		if (!return_type.is_void())
+		{
+			// HLSL compiler doesn't handle discard like a shader kill
+			// Add a return statement to exit functions in case discard is the last control flow statement
+			// See https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/discard--sm4---asm-
+			code += "\treturn ";
+			write_constant(code, return_type, constant());
+			code += ";\n";
+		}
 
 		return set_block(0);
 	}

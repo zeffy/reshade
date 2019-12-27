@@ -3,34 +3,17 @@
  * License: https://github.com/crosire/reshade#license
  */
 
-#include "log.hpp"
+#include "dll_log.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_command_list.hpp"
 #include "d3d12_command_queue.hpp"
 
 D3D12Device::D3D12Device(ID3D12Device *original) :
 	_orig(original),
-	_interface_version(0) {
-	assert(original != nullptr);
-}
-
-void D3D12Device::clear_drawcall_stats(bool release_resources)
-{
-	const std::lock_guard<std::mutex> lock(_device_global_mutex);
-
-	_draw_call_tracker.reset();
-	_current_dsv_clear_index = 1;
-
-	if (release_resources)
-		_depthstencil_resources_by_handle.clear();
-}
-
-com_ptr<ID3D12Resource> D3D12Device::resource_from_handle(D3D12_CPU_DESCRIPTOR_HANDLE handle)
-{
-	assert(handle.ptr != 0);
-
-	const std::lock_guard<std::mutex> lock(_device_global_mutex);
-	return _depthstencil_resources_by_handle[handle.ptr];
+	_interface_version(0),
+	_buffer_detection(original) {
+	assert(_orig != nullptr);
+	_buffer_detection.init(_orig, &_buffer_detection);
 }
 
 bool D3D12Device::check_and_upgrade_interface(REFIID riid)
@@ -89,22 +72,18 @@ HRESULT STDMETHODCALLTYPE D3D12Device::QueryInterface(REFIID riid, void **ppvObj
 }
 ULONG   STDMETHODCALLTYPE D3D12Device::AddRef()
 {
-	++_ref;
-
-	return _orig->AddRef();
+	_orig->AddRef();
+	return InterlockedIncrement(&_ref);
 }
 ULONG   STDMETHODCALLTYPE D3D12Device::Release()
 {
-	--_ref;
-
-	// Decrease internal reference count and verify it against our own count
-	const ULONG ref = _orig->Release();
-	if (ref != 0 && _ref != 0)
+	const ULONG ref = InterlockedDecrement(&_ref);
+	const ULONG ref_orig = _orig->Release();
+	if (ref != 0)
 		return ref;
-	else if (ref != 0)
-		LOG(WARN) << "Reference count for ID3D12Device" << _interface_version << " object " << this << " is inconsistent: " << ref << ", but expected 0.";
+	if (ref_orig != 0) // Verify internal reference count
+		LOG(WARN) << "Reference count for ID3D12Device" << _interface_version << " object " << this << " is inconsistent.";
 
-	assert(_ref <= 0);
 #if RESHADE_VERBOSE_LOG
 	LOG(DEBUG) << "Destroyed ID3D12Device" << _interface_version << " object " << this << ".";
 #endif
@@ -191,6 +170,8 @@ HRESULT STDMETHODCALLTYPE D3D12Device::CreateCommandList(UINT nodeMask, D3D12_CO
 	// Upgrade to the actual interface version requested here (and only hook graphics command lists)
 	if (command_list_proxy->check_and_upgrade_interface(riid))
 	{
+		command_list_proxy->_buffer_detection.init(_orig, &_buffer_detection);
+
 		*ppCommandList = command_list_proxy;
 	}
 	else // Do not hook object if we do not support the requested interface or this is a compute command list
@@ -206,7 +187,7 @@ HRESULT STDMETHODCALLTYPE D3D12Device::CheckFeatureSupport(D3D12_FEATURE Feature
 }
 HRESULT STDMETHODCALLTYPE D3D12Device::CreateDescriptorHeap(const D3D12_DESCRIPTOR_HEAP_DESC *pDescriptorHeapDesc, REFIID riid, void **ppvHeap)
 {
-	return  _orig->CreateDescriptorHeap(pDescriptorHeapDesc, riid, ppvHeap);
+	return _orig->CreateDescriptorHeap(pDescriptorHeapDesc, riid, ppvHeap);
 }
 UINT    STDMETHODCALLTYPE D3D12Device::GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapType)
 {
@@ -235,12 +216,10 @@ void    STDMETHODCALLTYPE D3D12Device::CreateRenderTargetView(ID3D12Resource *pR
 void    STDMETHODCALLTYPE D3D12Device::CreateDepthStencilView(ID3D12Resource *pResource, const D3D12_DEPTH_STENCIL_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
 	_orig->CreateDepthStencilView(pResource, pDesc, DestDescriptor);
-
+#if RESHADE_DX12_CAPTURE_DEPTH_BUFFERS
 	if (pResource != nullptr)
-	{
-		const std::lock_guard<std::mutex> lock(_device_global_mutex);
-		_depthstencil_resources_by_handle[DestDescriptor.ptr] = pResource;
-	}
+		_buffer_detection.on_create_dsv(pResource, DestDescriptor);
+#endif
 }
 void    STDMETHODCALLTYPE D3D12Device::CreateSampler(const D3D12_SAMPLER_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
@@ -401,6 +380,8 @@ HRESULT STDMETHODCALLTYPE D3D12Device::CreateCommandList1(UINT NodeMask, D3D12_C
 	// Upgrade to the actual interface version requested here (and only hook graphics command lists)
 	if (command_list_proxy->check_and_upgrade_interface(riid))
 	{
+		command_list_proxy->_buffer_detection.init(_orig, &_buffer_detection);
+
 		*ppCommandList = command_list_proxy;
 	}
 	else // Do not hook object if we do not support the requested interface or this is a compute command list
