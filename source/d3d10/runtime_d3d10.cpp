@@ -252,8 +252,7 @@ void reshade::d3d10::runtime_d3d10::on_present(buffer_detection &tracker)
 #if RESHADE_DX10_CAPTURE_DEPTH_BUFFERS
 	_current_tracker = &tracker;
 	assert(_depth_clear_index_override != 0);
-	update_depthstencil_texture(_has_high_network_activity ? nullptr :
-		tracker.find_best_depth_texture(_filter_aspect_ratio ? _width : 0, _height, _depth_texture_override, _preserve_depth_buffers ? _depth_clear_index_override : 0));
+	update_depthstencil_texture(tracker.find_best_depth_texture(_filter_aspect_ratio ? _width : 0, _height, _depth_texture_override, _preserve_depth_buffers ? _depth_clear_index_override : 0));
 #endif
 
 	_app_state.capture();

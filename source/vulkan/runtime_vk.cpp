@@ -491,8 +491,7 @@ void reshade::vulkan::runtime_vk::on_present(VkQueue queue, uint32_t swapchain_i
 
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
 	_current_tracker = &tracker;
-	update_depthstencil_image(_has_high_network_activity ? buffer_detection::depthstencil_info { VK_NULL_HANDLE } :
-		tracker.find_best_depth_texture(_use_aspect_ratio_heuristics ? _width : 0, _height, _depth_image_override));
+	update_depthstencil_image(tracker.find_best_depth_texture(_use_aspect_ratio_heuristics ? _width : 0, _height, _depth_image_override));
 #endif
 
 	update_and_render_effects();

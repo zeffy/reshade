@@ -265,8 +265,7 @@ void reshade::opengl::runtime_gl::on_present()
 	_app_state.capture();
 
 #if RESHADE_OPENGL_CAPTURE_DEPTH_BUFFERS
-	update_depthstencil_texture(_has_high_network_activity ? buffer_detection::depthstencil_info { 0 } :
-		_buffer_detection.find_best_depth_texture(_use_aspect_ratio_heuristics ? _width : 0, _height, _depth_source_override));
+	update_depthstencil_texture(_buffer_detection.find_best_depth_texture(_use_aspect_ratio_heuristics ? _width : 0, _height, _depth_source_override));
 #endif
 
 	// Copy back buffer to RBO
@@ -1191,7 +1190,7 @@ void reshade::opengl::runtime_gl::draw_depth_debug_menu()
 				continue; // Skip invalid entries
 
 			char label[512] = "";
-			sprintf_s(label, "%s0x%08x", (depth_source == _depth_source && !_has_high_network_activity ? "> " : "  "), depth_source);
+			sprintf_s(label, "%s0x%08x", (depth_source == _depth_source && "> "), depth_source);
 
 			if (bool value = _depth_source_override == depth_source;
 				ImGui::Checkbox(label, &value))
